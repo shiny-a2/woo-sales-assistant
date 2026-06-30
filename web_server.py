@@ -168,8 +168,8 @@ async def brain_vision(body: VisionIn, x_sb_token: str = Header(None, alias="X-S
                 name=cust.get("name", ""), amount=receipt.get("amount", ""), extra=extra)
         except Exception as e:  # noqa: BLE001
             print(f"[brain] ارسالِ رسیدِ کانالی به گروه ناموفق: {type(e).__name__}: {e}")
-    elif (not cards) and cust and body.image_b64 and _tg_app:
-        # عکسِ ساعت/پست/استوری بود ولی محصولی پیدا نشد → ارجاع به همکاران (همهٔ کانال‌ها)
+    elif (not cards) and (not ctx.get("ask_gender")) and cust and body.image_b64 and _tg_app:
+        # عکس بود ولی محصولی پیدا نشد → ارجاع به همکاران (مگر فقط جنسیت پرسیده باشد)
         try:
             import base64 as _b64
 
