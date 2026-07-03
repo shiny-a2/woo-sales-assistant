@@ -250,17 +250,47 @@ async def get_briefs(ids):
 
 
 async def search_by_reference(reference, limit=6):
-    """محصول(ها) را با کد/رفرنس پیدا می‌کند (جستجوی متنیِ ووکامرس عنوان/SKU/رفرنس را پوشش می‌دهد)."""
+    """محصول(ها) را با کد/رفرنس پیدا می‌کند: عنوان/SKU + ویژگیِ «رفرانس»، با نرمال‌سازیِ خط‌تیره/فاصله.
+    محصولِ موجودِ بی‌قیمت (تماس بگیرید) را حذف نمی‌کند تا به‌اشتباه «ناموجود» نشود."""
     ref = (reference or "").strip()
     if not ref:
         return []
-    items = await get("products", {"search": ref, "per_page": max(1, min(int(limit or 6), 12)), "status": "publish"})
-    out = []
-    for p in items:
+    per = max(1, min(int(limit or 6), 12))
+
+    def _norm(s):
+        return re.sub(r"[\s._-]+", "", (s or "")).lower()
+
+    want = _norm(ref)
+    seen, out = set(), []
+
+    def _consider(p):
         b = _product_brief(p)
-        if b.get("price_toman"):
+        pid = b.get("id")
+        if pid in seen:
+            return
+        # فقط تطابقِ واقعیِ کد را بپذیر (عنوان/SKU/ویژگیِ رفرانس)، نه هر نتیجهٔ جستجوی متنی
+        hay = _norm(b.get("reference")) + "|" + _norm(p.get("sku")) + "|" + _norm(b.get("name"))
+        if want and want in hay:
+            seen.add(pid)
             out.append(b)
-    return out
+
+    # ۱) جستجوی متنیِ ووکامرس (عنوان/SKU) — کدِ خام و نسخه‌های بی‌خط‌تیره/بی‌فاصله
+    for q in {ref, ref.replace("-", " "), ref.replace("-", ""), ref.replace(" ", "")}:
+        try:
+            items = await get("products", {"search": q, "per_page": per, "status": "publish"})
+        except Exception:  # noqa: BLE001
+            items = []
+        for p in items:
+            _consider(p)
+    # ۲) اگر با متن پیدا نشد، مستقیم با SKU تلاش کن (رفرنس اغلب همان SKU است)
+    if not out:
+        try:
+            items = await get("products", {"sku": ref, "per_page": per, "status": "publish"})
+            for p in items:
+                _consider(p)
+        except Exception:  # noqa: BLE001
+            pass
+    return out[:per]
 
 
 _REF_RE = re.compile(r"\b([A-Za-z]{1,5}[ -]?\d{3,}[A-Za-z0-9.\-]*)\b")  # کدِ رفرنس مثل R2453125506 یا BF2018-52E
@@ -436,10 +466,29 @@ async def search_watches(gender=None, movement=None, dial_color=None, strap_colo
     exclude_ids: محصولاتی که قبلاً نشان داده شده‌اند (برای نتایجِ غیرتکراری).
     newest: «مدلِ جدید/جدیدترین» → مرتب‌سازی بر اساسِ تاریخِ درجِ محصول (جدید به قدیم).
     """
-    # یک عددِ تکی → بازه‌ی هوشمند
-    if target_toman and not min_toman and not max_toman:
-        min_toman = int(int(target_toman) * 0.90)
-        max_toman = int(int(target_toman) * 1.15)
+    # یک عددِ تکی → بازه‌ی هوشمند (۱۰٪ پایین تا ۱۵٪ بالا).
+    # مقاوم در برابرِ خطای مدل: هر شکلی که «یک عدد» به آن رسیده باشد را به بازه تبدیل کن —
+    # target_toman، یا min==max، یا فقط min، یا فقط max. (مستقل از کانال؛ همین‌جا تضمین می‌شود.)
+    def _i(v):
+        try:
+            return int(v) if v else None
+        except (TypeError, ValueError):
+            return None
+    _t, _lo, _hi = _i(target_toman), _i(min_toman), _i(max_toman)
+    single = None
+    if _t and not _lo and not _hi:
+        single = _t                       # مدل درست عمل کرد: target_toman
+    elif _t and (_lo or _hi):
+        single = _t                       # target + یک کرانِ اضافیِ اشتباه → target مبناست
+    elif _lo and _hi and _lo == _hi:
+        single = _lo                      # min==max یعنی یک عددِ تکی، نه بازه
+    elif _lo and not _hi:
+        single = _lo                      # فقط min برای یک عدد → بازه بساز
+    elif _hi and not _lo:
+        single = _hi                      # فقط max برای یک عدد → بازه بساز
+    if single:
+        min_toman = int(single * 0.90)
+        max_toman = int(single * 1.15)
     # نرمال‌سازیِ جنسِ بند (فلزی→استیل, چرمی→چرم, …)
     if strap_material:
         strap_material = _STRAP_MAT.get(strap_material.strip(), strap_material.strip())
