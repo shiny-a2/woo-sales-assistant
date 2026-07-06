@@ -4,7 +4,12 @@
 """
 from __future__ import annotations
 
+import time
+
+import analytics
 import llm
+import metrics
+import modelcfg
 import persona
 import sessions
 import textfmt
@@ -28,6 +33,75 @@ def _phone_hint(phone):
             "برای ثبتِ سفارش/پیگیری از همین شماره استفاده کن و دوباره شماره نپرس."}
 
 
+def _last_user_text(messages):
+    for m in reversed(messages or []):
+        c = m.get("content")
+        if m.get("role") == "user" and isinstance(c, str) and c.strip():
+            return c
+    return ""
+
+
+def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False):
+    """شمردنِ عملکرد + تحلیلِ رفتارِ مشتری: پاسخ/کانال + رویدادهای کلیدی (سفارش/رسید/ارجاع/مدیا) + سیگنال‌های فروش."""
+    try:
+        ch = str(channel or "")
+        metrics.bump("reply", ch)
+        if image:
+            metrics.bump("image", ch)
+        if ctx.get("order"):
+            metrics.bump("order", ch)
+        if ctx.get("handoff"):
+            metrics.bump("handoff", ch)
+        if ctx.get("receipt"):
+            metrics.bump("receipt", ch)
+        if ctx.get("wrist_media") or ctx.get("wrist_media_request"):
+            metrics.bump("wrist_media", ch)
+        import salescfg
+        _abk, _ = salescfg.ab_assign(f"{ch}:{cid}")
+        if _abk:   # آزمونِ A/B لحن (اگر روشن باشد): پاسخ و سفارش را به‌تفکیکِ گروه بشمار
+            metrics.bump("ab", _abk)
+            if ctx.get("order"):
+                metrics.bump("ab_order", _abk)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        analytics.record(channel, cid, name, user_text, ctx)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import crm_index
+        crm_index.touch(channel, cid, name)   # افزودنِ خودکارِ هویتِ مخاطب به ایندکسِ کانتکت‌ها
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _greeting_hint(channel, user_id):
+    """راهنمای سلامِ ۶ساعته بر اساسِ فاصله از آخرین فعالیتِ همین گفتگو (همهٔ کانال‌ها)."""
+    if not (channel and user_id):
+        return ""
+    prev = sessions.touch_activity(str(channel), str(user_id))
+    if prev is not None and (time.time() - prev) < 6 * 3600:
+        return ("⏳ وضعیتِ گفتگو: ادامه‌دار (کمتر از ۶ ساعت از پیامِ قبلی گذشته). پس **دوباره سلام/احوال‌پرسی نکن**؛ "
+                "مستقیم و طبیعی ادامه بده و به پیام‌های قبلیِ همین گفتگو (ارسالی و دریافتی) دقت کن تا پاسخت دقیق باشد.")
+    return "⏳ وضعیتِ گفتگو: تازه یا پس از وقفهٔ بیش از ۶ ساعت. پاسخت را با یک سلامِ گرمِ کوتاهِ متناسبِ زمان شروع کن."
+
+
+def _ab_extra(channel, uid):
+    """متنِ اضافهٔ لحن برای آزمونِ A/B (خاموش = رشتهٔ خالی → بدونِ اثر روی پاسخ)."""
+    try:
+        import salescfg
+        _, txt = salescfg.ab_assign(f"{channel}:{uid}")
+        return ("\n\n" + txt) if txt else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# متنِ روی خودِ تصویر (کدِ رفرنس/برند/مدل) اغلب کلیدِ پیدا کردنِ دقیقِ محصول است → حتماً خوانده شود
+_IMAGE_TEXT_HINT = (
+    " 🔎 اگر روی خودِ تصویر متنی هست (کدِ رفرنس/مدل مثلِ «BF2018-52E» یا «DK.1.14002-5»، نامِ برند، یا نوشتهٔ روی صفحه/قاب)"
+    " آن را با دقت بخوان: اگر کد/رفرنس دیدی حتماً اول با find_by_reference همان را جستجو کن؛ و نامِ برندِ روی تصویر را هم در جستجو لحاظ کن.")
+
+
 async def reply(channel, user_id, text, user_name=None, customer_phone=None):
     """یک پیام را پاسخ می‌دهد.
 
@@ -38,13 +112,25 @@ async def reply(channel, user_id, text, user_name=None, customer_phone=None):
     if not text:
         return ("سلام 🌟 در خدمتم؛ چطور می‌تونم کمکتون کنم؟", ctx)
 
-    messages = [{"role": "system", "content": persona.system_prompt()}]
+    _sys = persona.system_prompt() + _ab_extra(channel, user_id)
+    _gh = _greeting_hint(channel, user_id)
+    if _gh:
+        _sys = _sys + "\n\n" + _gh
+    messages = [{"role": "system", "content": _sys}]
     hint = _name_hint(user_name)
     if hint:
         messages.append(hint)
     ph = _phone_hint(customer_phone)
     if ph:
         messages.append(ph)
+    if customer_phone:   # سابقهٔ خریدِ مشتری (کش‌شده) را به مغز بده تا شخصی‌سازی کند
+        try:
+            import crm_index
+            _hh = await crm_index.history_hint(channel, user_id, customer_phone)
+            if _hh:
+                messages.append({"role": "system", "content": _hh})
+        except Exception:  # noqa: BLE001
+            pass
     messages.extend(sessions.history(channel, user_id))
     messages.append({"role": "user", "content": text})
 
@@ -65,6 +151,7 @@ async def reply(channel, user_id, text, user_name=None, customer_phone=None):
     sessions.append(channel, user_id, "user", text)
     sessions.append(channel, user_id, "assistant", answer)
     sessions.add_shown(channel, user_id, [c.get("id") for c in ctx.get("cards", [])])
+    _record_metrics(channel, ctx, text, user_name, user_id)
     return (answer, ctx)
 
 
@@ -81,8 +168,13 @@ async def reply_image(channel, user_id, image_data_url, caption="", user_name=No
                   " رنگ/استایل/برندی که از تصویر فهمیدی را کوتاه بگو و حتماً همین عبارت را در سؤالت بیاور:"
                   " «این ساعت رو برای خانم می‌خواید یا آقا؟»، و بعد از جوابِ مشتری با همان مشخصاتِ تصویر + جنسیت جستجو کن."
                   " این فقط برای ابهامِ زنانه/مردانه است؛ اگر برند/مدل یا موجودی‌اش نامعلوم بود، مثلِ قبل به همکاران ارجاع بده.")
+    user_text += _IMAGE_TEXT_HINT
 
-    messages = [{"role": "system", "content": persona.system_prompt()}]
+    _sys = persona.system_prompt() + _ab_extra(channel, user_id)
+    _gh = _greeting_hint(channel, user_id)
+    if _gh:
+        _sys = _sys + "\n\n" + _gh
+    messages = [{"role": "system", "content": _sys}]
     hint = _name_hint(user_name)
     if hint:
         messages.append(hint)
@@ -111,6 +203,7 @@ async def reply_image(channel, user_id, image_data_url, caption="", user_name=No
     sessions.append(channel, user_id, "user", "[تصویر ساعت] " + (caption or ""))
     sessions.append(channel, user_id, "assistant", answer)
     sessions.add_shown(channel, user_id, [c.get("id") for c in ctx.get("cards", [])])
+    _record_metrics(channel, ctx, caption, user_name, user_id, image=True)
     return (answer, ctx)
 
 
@@ -162,7 +255,7 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
     render_cards_inline=False: فقط مقدمهٔ تمیز را در متن می‌گذارد و کارت‌ها را ساختاریافته در
     ctx['cards'] نگه می‌دارد تا کانال خودش آن‌ها را (به‌صورت عکس/کارت) رندر کند.
     """
-    system = persona.system_prompt()
+    system = persona.system_prompt() + _ab_extra((customer or {}).get("channel"), (customer or {}).get("id"))
     extra = (system_extra or "").strip()
     if reply_context:  # مشتری به کارتِ یک محصول ریپلای کرده → مشخصاتِ همان را قطعی تزریق کن
         sheet = await _reply_context_sheet(reply_context)
@@ -171,7 +264,23 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
     if extra:
         system = system + "\n\n" + extra
 
+    # سلامِ هوشمندِ ۶ ساعته (همهٔ کانال‌ها)
+    if customer and customer.get("id"):
+        _gh = _greeting_hint(str(customer.get("channel") or "ch"), str(customer.get("id")))
+        if _gh:
+            system = system + "\n\n" + _gh
+
     convo = [{"role": "system", "content": system}]
+    if customer:   # سابقهٔ خریدِ مشتری (برای واتساپ، آیدی همان شماره است)
+        _ph = customer.get("phone") or (customer.get("id") if customer.get("channel") == "whatsapp" else None)
+        if _ph:
+            try:
+                import crm_index
+                _hh = await crm_index.history_hint(customer.get("channel"), customer.get("id"), _ph)
+                if _hh:
+                    convo.append({"role": "system", "content": _hh})
+            except Exception:  # noqa: BLE001
+                pass
     for m in messages or []:
         role = m.get("role")
         content = (m.get("content") or "").strip()
@@ -203,6 +312,7 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
         text = (text + "\n\n🎥 عکس و ویدئوی روی مچ‌دستِ همین ساعت:\n" + links).strip()
     if _ck and ctx.get("cards"):  # ثبتِ کارت‌های نشان‌داده‌شده تا دفعهٔ بعد تکرار نشوند
         sessions.add_shown(_ck[0], _ck[1], [c.get("id") for c in ctx["cards"] if c.get("id")])
+    _record_metrics((customer or {}).get("channel"), ctx, _last_user_text(messages), (customer or {}).get("name"), (customer or {}).get("id"))
     return (text, ctx)
 
 
@@ -223,6 +333,37 @@ async def polish_staff_reply(staff_text, question=""):
         return staff_text
 
 
+async def generate_followup(messages, name="", channel=""):
+    """پیامِ پیگیریِ کوتاه و مشاوره‌محور بر اساسِ همین گفتگوی اخیر می‌سازد (به‌جای متنِ ثابت). خالی برمی‌گرداند اگر نشد."""
+    recent = []
+    for m in (messages or [])[-12:]:
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", "")
+        content = (m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or ""
+        content = str(content).strip()
+        if not content:
+            continue
+        who = "مشتری" if role == "user" else "ما"
+        recent.append(f"{who}: {content[:300]}")
+    convo = "\n".join(recent[-10:]).strip()
+    sys = (
+        "تو مشاورِ فروشِ گالری جواهریان (فروشگاهِ تخصصیِ ساعت) هستی. یک گفتگوی اخیر با مشتری مدتی است ساکت مانده. "
+        "یک «پیامِ پیگیریِ» کوتاه بنویس که: به‌طور طبیعی و نامحسوس به موضوعِ همین گفتگوی اخیر اشاره کند (نه متنِ عمومیِ ثابت و کلیشه‌ای)؛ "
+        "مشتری را بدونِ فشار و بدونِ حسِ مزاحمت، دوباره به ادامهٔ گفتگو و مشاوره دعوت کند؛ گرم، محترمانه و کاملاً فارسیِ روان و بدونِ کلمهٔ لاتین باشد؛ "
+        "کوتاه (۱ تا ۳ جمله) با ایموجیِ کم و به‌جا. اگر مشتری دنبالِ مدل/بودجه/سلیقهٔ خاصی بود همان را ظریف یادآوری کن. "
+        "اگر نامِ مشتری داده شد، محترمانه با نامش شروع کن. فقط خودِ متنِ پیام را برگردان و هیچ توضیحِ اضافه ننویس."
+    )
+    user = ((f"نامِ مشتری: {name}\n" if name else "") + (f"کانال: {channel}\n" if channel else "")
+            + "گفتگوی اخیر (قدیمی به جدید):\n"
+            + (convo or "(تاریخچهٔ گفتگو در دسترس نیست؛ یک پیگیریِ گرم و کوتاهِ مشاوره‌محور برای مشتریِ گالری بنویس.)"))
+    try:
+        resp = await llm._create([{"role": "system", "content": sys}, {"role": "user", "content": user}], with_tools=False)
+        out = (resp.choices[0].message.content or "").strip()
+        return textfmt.clean_for_chat(out) or out
+    except Exception as e:  # noqa: BLE001
+        print(f"[assistant] generate_followup ناموفق: {type(e).__name__}: {e}")
+        return ""
+
+
 async def answer_image(image_data_url, caption="", messages=None, render_cards_inline=True, customer=None):
     """تشخیصِ عکسِ ساعت (بدونِ حالت/session) برای همهٔ کانال‌ها — مثلِ answer_messages ولی با تصویر.
 
@@ -237,10 +378,20 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         "• اگر **ساعت** است ولی **مطمئن نیستی زنانه است یا مردانه** (مثلاً قابِ متوسط یا مدلی بینِ زنانه و مردانه): "
         "هیچ ساعتی نشان نده و حدس نزن؛ رنگ/استایلی که از تصویر فهمیدی را کوتاه بگو و حتماً این عبارت را در سؤالت بیاور "
         "«این ساعت رو برای خانم می‌خواید یا آقا؟»، بعد از جواب با همان مشخصات + جنسیت جستجو کن (این یک سؤالِ کوتاه است، نه ارجاع به همکاران).\n"
-        "• اگر **مطمئن نیستی** (برند/مدل واضح نیست، تصویر مبهم است، یا مطمئن نیستی موجود داریم): "
+        "• اگر تصویر **اصلاً ساعت نیست** (و رسیدِ پرداخت هم نیست) — مثلاً عکسِ شخص، مکان، یا شیءِ نامرتبط: "
+        "به همکاران ارجاع نده و محصول نشان نده؛ در عوض مؤدبانه و گرم مشتری را وارد گفتگو کن "
+        "(بپرس دنبالِ چه ساعتی هستند یا چطور می‌توانی کمکشان کنی). "
+        "**حتماً پاسخت را دقیقاً با نشانهٔ ‹NOWATCH› شروع کن** — این نشانه فقط برای سیستم است و حذف می‌شود.\n"
+        "• اگر **ساعت است ولی مطمئن نیستی** (برند/مدل واضح نیست، تصویر مبهم است، یا مطمئن نیستی موجود داریم): "
         "**محصولِ حدسی نشان نده**؛ فقط بگو «عکستون رو دیدم، برای دقت از همکارانم می‌پرسم و جوابتون رو می‌فرستم 🙏» "
         "(تا به گروهِ همکاران ارجاع شود). هرگز محصول یا برندِ اشتباه به مشتری نسبت نده.")
-    convo = [{"role": "system", "content": persona.system_prompt()}]
+    user_text += _IMAGE_TEXT_HINT
+    _sys = persona.system_prompt() + _ab_extra((customer or {}).get("channel"), (customer or {}).get("id"))
+    if customer and customer.get("id"):
+        _gh = _greeting_hint(str(customer.get("channel") or "ch"), str(customer.get("id")))
+        if _gh:
+            _sys = _sys + "\n\n" + _gh
+    convo = [{"role": "system", "content": _sys}]
     for m in (messages or []):
         role = m.get("role")
         content = (m.get("content") or "").strip()
@@ -256,11 +407,14 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
     if _ck:
         ctx["shown_ids"] = list(sessions.shown_ids(_ck[0], _ck[1]))
     try:
-        text = await llm.chat(convo, ctx)
+        text = await llm.chat(convo, ctx, model=modelcfg.vision_model())  # مدلِ عکس (جدا از مدلِ چت)
     except Exception as e:  # noqa: BLE001
         print(f"[assistant] خطا در answer_image: {type(e).__name__}: {e}")
         text = ""
     text = textfmt.clean_for_chat(text)
+    if "‹NOWATCH›" in text[:40] or "<NOWATCH>" in text[:40] or "NOWATCH" in text[:20]:
+        ctx["not_watch"] = True   # عکسِ غیرِ ساعت → مشتری را وارد گفتگو کن، به همکاران ارجاع نده
+        text = text.replace("‹NOWATCH›", "").replace("<NOWATCH>", "").replace("NOWATCH", "").strip()
     cards = ctx.get("cards") or []
     _intro = "چند ساعتِ نزدیک به تصویری که فرستادید پیدا کردم 🌟 ببینید:"
     if cards and render_cards_inline:
@@ -275,6 +429,7 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         ctx["ask_gender"] = True
     if _ck and cards:  # ثبتِ کارت‌های تصویری در همان مخزنِ shown_ids (عدمِ‌تکرار با مسیرِ متن)
         sessions.add_shown(_ck[0], _ck[1], [c.get("id") for c in cards if c.get("id")])
+    _record_metrics((customer or {}).get("channel"), ctx, caption, (customer or {}).get("name"), (customer or {}).get("id"), image=True)
     return (text, ctx)
 
 

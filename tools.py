@@ -108,6 +108,20 @@ SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "customer_history",
+            "description": "سابقهٔ خریدِ یک مشتری را با «شمارهٔ تماس» می‌گیرد (چه سفارش‌هایی داشته و وضعیتشان). وقتی مشتری شماره‌اش را داد یا خواستی بدانی قبلاً خریده یا نه، این را صدا بزن تا شخصی و دقیق راهنمایی کنی و از سابقه‌اش هوشمندانه استفاده کنی.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {"type": "string", "description": "شمارهٔ تماسِ مشتری"},
+                },
+                "required": ["phone"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_by_reference",
             "description": "وقتی مشتری یک کد یا رفرنسِ محصول گفت (مثل «BF2018-52E» یا «DK.1.14002-5»)، محصولِ متناظر را پیدا می‌کند. هرگز نگو «اطلاعی ندارم»؛ این را صدا بزن.",
             "parameters": {
@@ -286,6 +300,15 @@ async def dispatch(name, args_json, ctx):
                 res["status_fa"] = persona.STATUS_FA.get(res.get("status"), res.get("status"))
             return _json(res)
 
+        if name == "customer_history":
+            orders = await woo.customer_orders(args.get("phone", ""))
+            if not orders:
+                return _json({"found": False, "note": "سفارشی برای این شماره پیدا نشد — احتمالاً مشتریِ جدید است."})
+            return _json({"found": True, "count": len(orders), "orders": [
+                {"number": o["number"], "date": o["date"],
+                 "status": persona.STATUS_FA.get(o["status"], o["status"]),
+                 "total_toman": o["total_toman"], "items": o["items"]} for o in orders]})
+
         if name == "find_by_reference":
             ref = args.get("reference", "")
             items = await woo.search_by_reference(ref)
@@ -363,7 +386,8 @@ async def dispatch(name, args_json, ctx):
                 "reason": args.get("reason", ""),
                 "contact": args.get("contact", ""),
             }
-            return _json({"ok": True, "message": "به اپراتور ارجاع داده شد؛ به‌زودی با مشتری تماس می‌گیرند."})
+            # به مشتری یک پیامِ کوتاهِ «الان وصلت می‌کنم» بده؛ اتصالِ زندهٔ دوطرفه خودکار برقرار می‌شود.
+            return _json({"ok": True, "message": "همین الان شما رو به همکارِ انسانیمون وصل می‌کنم 👤🙏 چند لحظه صبر کنید."})
 
         return _json({"error": f"ابزار ناشناخته: {name}"})
     except Exception as e:  # noqa: BLE001 — خطا را به مدل برمی‌گردانیم تا خودش مدیریت کند

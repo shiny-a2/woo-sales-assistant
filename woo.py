@@ -13,6 +13,7 @@ import requests
 from requests.exceptions import RequestException
 from woocommerce import API
 
+import brands
 import config
 
 _api = None
@@ -33,17 +34,18 @@ def _client():
 
 
 def _get_sync(endpoint, params=None):
-    # هاستِ فروشگاه گاهی اتصال را تایم‌اوت می‌کند؛ چند بار تلاشِ مجدد با مکثِ کوتاه
+    # هاستِ فروشگاه گاهی اتصال را تایم‌اوت/ری‌ست می‌کند؛ چند بار تلاشِ مجدد با مکثِ کوتاه
+    # (OSError هم گرفته می‌شود تا ConnectionResetError/WinError 10054 مشتری را بی‌محصول نگذارد)
     last = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             resp = _client().get(endpoint, params=params or {})
             resp.raise_for_status()
             return resp.json()
-        except RequestException as e:
+        except (RequestException, OSError) as e:
             last = e
-            if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
+            if attempt < 3:
+                time.sleep(0.8 * (attempt + 1))
     raise last
 
 
@@ -165,6 +167,7 @@ def _product_full(p):
 async def search_products(query=None, category=None, min_toman=None, max_toman=None,
                           in_stock_only=True, limit=6, orderby="popularity",
                           attribute=None, attribute_term=None):
+    query = brands.normalize_text(query) if query else query   # نامِ مستعارِ برند → فارسیِ کامل
     params = {
         "per_page": max(1, min(int(limit or 6), 12)),
         "status": "publish",
@@ -446,11 +449,16 @@ def _gender_ok(brief, gender):
 
 def site_search_link(gender=None, style=None, dial_color=None, strap_color=None,
                      brand=None, movement=None, query=None):
-    """لینک جست‌وجوی محصول در سایت بر اساس معیارها (برای «خودت ببین»)."""
+    """لینکِ «نتایج جستجو»ی سایت (a2ps) — برای وقتی مشتری کلِ یک برند/دسته را می‌خواهد ببیند.
+
+    قالب: {WOO_URL}/نتایج-جستجو/?a2ps=<کلمات با + به‌هم> — مثلاً …/?a2ps=زنانه+ولدر
+    """
     import urllib.parse
-    words = [w for w in ["ساعت", gender, style, brand, movement, dial_color, strap_color, query] if w]
-    q = urllib.parse.urlencode({"post_type": "product", "s": " ".join(words)})
-    return f"{config.WOO_URL}/?{q}"
+    if brand:
+        brand = brands.canonical(brand)
+    words = [str(w).strip() for w in [gender, brand, style, movement, dial_color, strap_color, query] if w and str(w).strip()]
+    terms = " ".join(words) or "ساعت"
+    return config.WOO_URL.rstrip("/") + "/نتایج-جستجو/?a2ps=" + urllib.parse.quote_plus(terms)
 
 
 async def search_watches(gender=None, movement=None, dial_color=None, strap_color=None,
@@ -466,6 +474,9 @@ async def search_watches(gender=None, movement=None, dial_color=None, strap_colo
     exclude_ids: محصولاتی که قبلاً نشان داده شده‌اند (برای نتایجِ غیرتکراری).
     newest: «مدلِ جدید/جدیدترین» → مرتب‌سازی بر اساسِ تاریخِ درجِ محصول (جدید به قدیم).
     """
+    # نامِ مستعار/مخفف/انگلیسیِ برند → نامِ کاملِ فارسی (مثلاً «سی‌کی/ck» → «کلوین کلاین»)
+    brand = brands.canonical(brand) if brand else brand
+    query = brands.normalize_text(query) if query else query
     # یک عددِ تکی → بازه‌ی هوشمند (۱۰٪ پایین تا ۱۵٪ بالا).
     # مقاوم در برابرِ خطای مدل: هر شکلی که «یک عدد» به آن رسیده باشد را به بازه تبدیل کن —
     # target_toman، یا min==max، یا فقط min، یا فقط max. (مستقل از کانال؛ همین‌جا تضمین می‌شود.)
@@ -614,6 +625,46 @@ async def _order_has_company_stock(product_ids):
         if availability(p).get("shipping") != "ارسال فوری":
             return True
     return False
+
+
+async def customer_orders(phone, limit=10):
+    """سابقهٔ سفارشِ یک مشتری بر اساسِ شمارهٔ تماس (billing) — تا مغز بداند این شخص قبلاً چه خریده.
+
+    خروجی: [{number, date, status, total_toman, items}]  (جدید→قدیم، بدونِ تکرار).
+    """
+    d = _digits(phone or "")
+    if len(d) < 7:
+        return []
+    core = d[-10:] if len(d) >= 10 else d          # ۱۰ رقمِ آخر برای تطابق
+    variants = {d, core, "0" + core[-10:], "98" + core[-10:]}
+    seen = {}
+    for v in {x for x in variants if len(x) >= 7}:
+        try:
+            rows = await get("orders", {"search": v, "per_page": limit, "orderby": "date", "order": "desc"})
+        except Exception:  # noqa: BLE001
+            rows = []
+        if not isinstance(rows, list):
+            continue
+        for o in rows:
+            oid = o.get("id")
+            if oid in seen:
+                continue
+            bphone = _digits((o.get("billing") or {}).get("phone") or "")
+            if len(bphone) < 9 or bphone[-9:] != core[-9:]:   # واقعاً همین مشتری باشد
+                continue
+            try:
+                tot = int(float(o.get("total") or 0) / (config.MONEY_DIVISOR or 1))
+            except Exception:  # noqa: BLE001
+                tot = 0
+            seen[oid] = {
+                "number": o.get("number") or oid,
+                "date": (o.get("date_created") or "")[:10],
+                "status": o.get("status") or "",
+                "total_toman": tot,
+                "items": [(li.get("name") or "").strip() for li in (o.get("line_items") or []) if li.get("name")][:4],
+            }
+    out = sorted(seen.values(), key=lambda x: x.get("date", ""), reverse=True)
+    return out[:limit]
 
 
 async def order_status(order_number, phone):

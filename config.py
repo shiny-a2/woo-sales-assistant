@@ -60,6 +60,9 @@ SUPPORT_GROUP_ID = _int("SUPPORT_GROUP_ID", 0) or STAFF_GROUP_ID
 # گروهِ پیگیریِ مشتریان/CRM برای ثبتِ سفارشِ کارت‌به‌کارت + فیش + دکمهٔ تایید/رد
 ORDERS_GROUP_ID = _int("ORDERS_GROUP_ID", 0) or SUPPORT_GROUP_ID
 MEDIA_CHANNEL = _get("MEDIA_CHANNEL", "javaherian_products")
+# گروهِ کنترلِ کمپینِ اینستاگرام: لینکِ پست + ریپلایِ متن → ثبتِ کمپینِ کامنت→دایرکت
+IG_CAMPAIGN_GROUP_ID = _int("IG_CAMPAIGN_GROUP_ID", 0)
+IG_CAMPAIGN_URL = _get("IG_CAMPAIGN_URL", "http://127.0.0.1:8092/api/campaign")
 
 # ---------- ووکامرس ----------
 WOO_URL = (_get("WOO_URL", "") or "").rstrip("/")
@@ -70,6 +73,10 @@ WOO_CS = _get("WOO_CS", "")
 OPENAI_API_KEY = _get("OPENAI_API_KEY", "")
 OPENAI_MODEL = _get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TEMPERATURE = _float("OPENAI_TEMPERATURE", 0.4)
+# برای مدل‌های استدلالیِ GPT-5/o-سری: minimal/low/medium/high (خالی = پیش‌فرضِ مدل). temperature برایشان بی‌اثر/ممنوع است.
+OPENAI_REASONING_EFFORT = _get("OPENAI_REASONING_EFFORT", "")
+# بودجهٔ خروجیِ مدل‌های GPT-5/o (شاملِ توکن‌های reasoning) — کم باشد، متنِ پاسخ خالی می‌ماند
+OPENAI_MAX_COMPLETION_TOKENS = _int("OPENAI_MAX_COMPLETION_TOKENS", 4000)
 
 # ---------- نمایش قیمت ----------
 # واحد فروشگاه ریال است؛ برای نمایش تومان بر این عدد تقسیم می‌شود (۱۰)

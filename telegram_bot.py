@@ -156,7 +156,10 @@ async def _followup_after(context, chat_id, user_id):
         return
     _followup_tasks.pop(user_id, None)
     try:
-        await context.bot.send_message(chat_id, _FOLLOWUP_TEXT)
+        import assistant
+        # متنِ پیگیری را مغز بر اساسِ همین گفتگو می‌سازد (نه ثابت)؛ اگر نشد → متنِ ثابت
+        txt = await assistant.generate_followup(sessions.history(CHANNEL, user_id), "", "telegram")
+        await context.bot.send_message(chat_id, txt or _FOLLOWUP_TEXT)
     except Exception as e:  # noqa: BLE001
         print(f"[tg] فالوآپ ناموفق: {e}")
 
@@ -424,16 +427,124 @@ async def post_crosschannel_receipt(bot, image_bytes, channel, customer_id, name
         return False
 
 
-async def _notify_channel(channel, customer_id, text):
+async def _notify_channel(channel, customer_id, text, control=""):
     url = _CHANNEL_NOTIFY.get(channel)
     if not url:
         return
+    payload = {"customer_id": str(customer_id), "text": text}
+    if control:
+        payload["control"] = control   # handoff_on / handoff_off → کانال پرچمِ محلیش را ست/پاک می‌کند
     try:
         async with httpx.AsyncClient(timeout=15) as c:
-            await c.post(url, json={"customer_id": str(customer_id), "text": text},
-                         headers={"X-SB-Token": config.SALE_BRAIN_TOKEN})
+            await c.post(url, json=payload, headers={"X-SB-Token": config.SALE_BRAIN_TOKEN})
     except Exception as e:  # noqa: BLE001
         print(f"[tg] اعلامِ نتیجه به کانالِ {channel} ناموفق: {e}")
+
+
+# ---------- اتصالِ زندهٔ مشتری به اپراتورِ انسانی (پلِ دوطرفه، همهٔ کانال‌ها) ----------
+# مغز مرکزِ کار است: لنگر در گروهِ پشتیبانی، رله‌ی کاربر→گروه و گروه→کاربر، و پایان با دستورِ اپراتور.
+_handoffs = {}          # group_msg_id → {channel, customer_id, name}  (لنگر + هر پیامِ رله‌شده)
+_handoff_active = {}    # (channel, customer_id) → anchor_group_msg_id (چت‌های فعالِ هندآف)
+# واژه‌های پایان (اپراتور در ریپلای می‌نویسد تا چت به دستیارِ هوشمند بازگردد).
+# واژه‌های صریحِ کم‌ابهام + شکلِ sigil (مثلِ «.بات» / «/پایان») تا پاسخِ عادیِ اپراتور به‌اشتباه هندآف را نبندد.
+_HANDOFF_END_WORDS = {"پایان", "بستن", "خاتمه", "پایان گفتگو", "end", "close"}
+_HANDOFF_END_RE = re.compile(r"^[./!]\s*(?:بات|پایان|ربات|بازگشت|ai|bot|end)\s*$", re.I)
+
+
+def is_handoff_active(channel, customer_id):
+    return (channel, str(customer_id)) in _handoff_active
+
+
+def _norm_end(s):
+    return (s or "").strip().strip(".!،/\\ ").lower()
+
+
+async def start_handoff(bot, channel, customer_id, name="", first_message="", reason=""):
+    """اتصالِ زندهٔ مشتری به اپراتور را شروع می‌کند: لنگر در گروه + ثبتِ وضعیت.
+    اگر از قبل فعال بود، فقط پیامِ تازه را به گروه رله می‌کند."""
+    gid = config.SUPPORT_GROUP_ID or config.STAFF_GROUP_ID
+    if not gid:
+        return False
+    key = (channel, str(customer_id))
+    if key in _handoff_active:
+        await relay_user_to_group(bot, channel, customer_id, first_message, name)
+        return True
+    cap = ("🔴 اتصالِ زندهٔ مشتری به اپراتور — کانال: " + _CHANNEL_FA.get(channel, channel) + "\n"
+           + (f"👤 {name}\n" if name else "")
+           + (f"📌 موضوع: {reason}\n" if reason else "")
+           + (f"💬 «{first_message}»\n" if first_message else "")
+           + "\n👈 روی همین پیام **ریپلای** کنید تا مستقیم برای مشتری برود.\n"
+           + "🟢 برای پایان و بازگرداندن به دستیارِ هوشمند، در ریپلای بنویسید: «پایان».")
+    try:
+        sent = await bot.send_message(gid, cap)
+    except Exception as e:  # noqa: BLE001
+        print(f"[tg] شروعِ اتصالِ زنده ناموفق: {e}")
+        return False
+    info = {"channel": channel, "customer_id": str(customer_id), "name": name}
+    _handoffs[sent.message_id] = info
+    _handoff_active[key] = sent.message_id
+    print(f"[tg] اتصالِ زنده شروع شد → {channel}:{customer_id}")
+    return True
+
+
+async def relay_user_to_group(bot, channel, customer_id, text, name=""):
+    """پیامِ کاربر (حین هندآف) را زیرِ لنگر به گروه می‌فرستد تا اپراتور ببیند و بتواند ریپلای کند."""
+    key = (channel, str(customer_id))
+    anchor = _handoff_active.get(key)
+    if not anchor:
+        return False
+    gid = config.SUPPORT_GROUP_ID or config.STAFF_GROUP_ID
+    body = ("👤 " + (name or "مشتری") + ": «" + (text or "[بدونِ متن]") + "»")
+    try:
+        sent = await bot.send_message(gid, body, reply_to_message_id=anchor)
+        # ریپلایِ اپراتور روی این پیام هم باید به همان هندآف نگاشت شود
+        _handoffs[sent.message_id] = _handoffs.get(anchor)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[tg] رله‌ی پیامِ کاربر به گروه ناموفق: {e}")
+        return False
+
+
+async def relay_user_photo_to_group(bot, channel, customer_id, image_bytes, text="", name=""):
+    """عکسِ کاربر (حین هندآف) را همراهِ متنِ سؤالش زیرِ لنگر به گروه می‌فرستد — عکسِ واقعی با کپشن، نه فقط «عکس فرستاد»."""
+    key = (channel, str(customer_id))
+    anchor = _handoff_active.get(key)
+    if not anchor:
+        return False
+    gid = config.SUPPORT_GROUP_ID or config.STAFF_GROUP_ID
+    cap = ("👤 " + (name or "مشتری") + " 📷" + (f": «{text}»" if text else " (عکس فرستاد)"))
+    cap = cap[:1024]   # سقفِ کپشنِ تلگرام
+    try:
+        if image_bytes:
+            sent = await bot.send_photo(gid, photo=bytes(image_bytes), caption=cap, reply_to_message_id=anchor)
+        else:
+            sent = await bot.send_message(gid, cap, reply_to_message_id=anchor)
+        # ریپلایِ اپراتور روی این پیام هم به همان هندآف نگاشت شود
+        _handoffs[sent.message_id] = _handoffs.get(anchor)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[tg] رله‌ی عکسِ کاربر به گروه ناموفق: {e}")
+        return False
+
+
+async def end_handoff(bot, channel, customer_id):
+    """پایانِ اتصالِ زنده: وضعیت پاک، پرچمِ کانال پاک (handoff_off)، و به مشتری اطلاع تا AI برگردد."""
+    key = (channel, str(customer_id))
+    if _handoff_active.pop(key, None) is None:
+        return False
+    for mid in [m for m, v in list(_handoffs.items())
+                if v and (v.get("channel"), str(v.get("customer_id"))) == (channel, str(customer_id))]:
+        _handoffs.pop(mid, None)
+    back = "گفتگو دوباره به دستیارِ هوشمندِ فروش سپرده شد 🤖🌟 در خدمتم؛ هر سؤالی دارید بفرمایید 🙏"
+    if channel == "telegram":
+        try:
+            await bot.send_message(int(customer_id), back)
+        except Exception as e:  # noqa: BLE001
+            print(f"[tg] اعلامِ پایانِ هندآف به مشتری ناموفق: {e}")
+    else:
+        await _notify_channel(channel, customer_id, back, control="handoff_off")
+    print(f"[tg] اتصالِ زنده پایان یافت → {channel}:{customer_id}")
+    return True
 
 
 async def _on_xrcp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -475,8 +586,11 @@ _escalations = {}   # group_message_id → {channel, customer_id, name}
 
 
 async def post_staff_escalation(bot, image_bytes, channel, customer_id, name="", question=""):
-    """عکسی که محصولش پیدا نشد را با سوالِ مشتری به گروهِ همکاران می‌فرستد تا ریپلای کنند."""
-    gid = config.STAFF_GROUP_ID or config.SUPPORT_GROUP_ID
+    """عکس/سوالِ مشتری که محصولش پیدا نشد → فقط به گروهِ «پیگیری/CRM» (نه گروهِ عکس‌وویدئو).
+
+    قانون: هر عکس/سوال/رسید/گفتگوی مشتری فقط در گروهِ CRM مطرح شود؛ گروهِ عکس‌وویدئو فقط برای
+    درخواستِ عکس/ویدئوی «محصولِ» ما روی مچ است (post_staff_request)، نه عکس/سوالِ خودِ مشتری."""
+    gid = config.SUPPORT_GROUP_ID or config.ORDERS_GROUP_ID or config.STAFF_GROUP_ID
     if not gid or not image_bytes:
         return False
     cap = ("❓ سوالِ مشتری دربارهٔ این عکس — کانال: " + _CHANNEL_FA.get(channel, channel) + "\n"
@@ -560,6 +674,77 @@ async def _post_ig_campaign(link, trigger, message, by="", kind="comment", reply
         return False
 
 
+# ── دستورِ ساختِ کپشن/پیام با هوش مصنوعی (فقط در گروهِ کمپینِ اینستاگرام) ──
+# فرم‌های مجاز (برای جلوگیری از فعال‌شدنِ تصادفی، فقط فرمِ اسلش یا دونقطه):
+_IG_CAPTION_TRIGGERS = (
+    ("/کپشن", "caption"), ("کپشن:", "caption"), ("/caption", "caption"), ("caption:", "caption"),
+    ("/پیام", "message"), ("پیام آماده:", "message"), ("/message", "message"),
+)
+
+
+def _caption_cmd(text):
+    """اگر پیام یک دستورِ ساختِ کپشن/پیام بود، (mode, brief) را برگردان؛ وگرنه None."""
+    t = (text or "").strip()
+    low = t.lower()
+    for kw, mode in _IG_CAPTION_TRIGGERS:
+        if low.startswith(kw.lower()):
+            brief = t[len(kw):].strip()
+            # اگر تلگرام @یوزرنیمِ ربات را به دستور چسبانده بود، حذفش کن
+            if brief.startswith("@"):
+                brief = brief.split(None, 1)[1].strip() if " " in brief else ""
+            return mode, brief
+    return None
+
+
+_IG_CAPTION_HELP = (
+    "🖋️ ساختِ کپشن/پیام با هوش مصنوعی\n"
+    "کافیه بنویسی:\n"
+    "• «کپشن: موضوع/توضیح» → کپشنِ آمادهٔ پست\n"
+    "• «پیام آماده: موضوع/توضیح» → متنِ آمادهٔ دایرکت/پاسخ\n\n"
+    "مثال:\n"
+    "کپشن: ساعت رولکس دیتونا طلایی، پستِ فروش، لحنِ لوکس و کوتاه\n\n"
+    "هرچی جزئیاتِ بیشتری بدی (محصول، مناسبت، لحن، طول) نتیجه دقیق‌تره."
+)
+
+
+async def _gen_ig_caption(mode, brief):
+    """متنِ فارسیِ تمیز، ایموجی‌دار، محترمانه و صمیمی می‌سازد (بدونِ ابزار → فقط تولیدِ متن)."""
+    kind = "کپشنِ پستِ اینستاگرام" if mode == "caption" else "متنِ آمادهٔ پیام/دایرکت"
+    system = (
+        "تو کپی‌رایترِ حرفه‌ایِ فارسیِ برندِ لوکسِ «گالری جواهریان» (ساعت و جواهرِ اصل) هستی. "
+        f"بر اساسِ درخواستِ کاربر یک {kind} بنویس که این ویژگی‌ها را داشته باشد: "
+        "تمیز و مرتب و خوانا؛ محترمانه و در عینِ حال صمیمی؛ با ایموجی‌های مناسب و متعادل (نه زیاد)؛ "
+        "بدونِ اغراقِ تبلیغاتیِ زننده و بدونِ وعده‌های نادرست؛ کاملاً فارسیِ روان و بدونِ هیچ کلمهٔ لاتین در متن. "
+        "اگر برای کپشن مناسب بود، در انتها چند هشتگِ فارسیِ کوتاه و مرتبط اضافه کن. "
+        "لحن و طول را با درخواست تطبیق بده. فقط خودِ متنِ نهایی را برگردان و هیچ توضیحِ اضافه‌ای ننویس."
+    )
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": brief}]
+    resp = await llm._create(messages, with_tools=False)
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def _handle_ig_caption_cmd(m, mode, brief):
+    """دستورِ کپشن/پیام در گروهِ اینستاگرام را رسیدگی می‌کند."""
+    if not brief:
+        await m.reply_text(_IG_CAPTION_HELP)
+        return
+    try:
+        await m.get_bot().send_chat_action(m.chat_id, ChatAction.TYPING)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        text = await _gen_ig_caption(mode, brief)
+    except Exception as e:  # noqa: BLE001
+        print(f"[tg] ساختِ کپشن ناموفق: {type(e).__name__}: {e}")
+        await m.reply_text("ساختِ متن همین الان ممکن نشد 🙏 چند لحظه بعد دوباره امتحان کن.")
+        return
+    if not text:
+        await m.reply_text("متنی تولید نشد 🙏 لطفاً درخواست را کمی دقیق‌تر بنویس.")
+        return
+    label = "🖋️ کپشنِ پیشنهادی:" if mode == "caption" else "🖋️ متنِ پیشنهادی:"
+    await m.reply_text(f"{label}\n\n{text}")
+
+
 async def _handle_ig_campaign_group(m):
     """گروهِ کمپین: لینکِ پست (+متن) یا «استوری + تریگر + متن» → ثبت و فعال‌سازیِ آنیِ کمپین."""
     cur = (m.text or m.caption or "").strip()
@@ -614,10 +799,38 @@ async def _on_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[tg] گروه شناسایی شد → id={m.chat_id} | {m.chat.title}")
     # گروهِ کنترلِ کمپینِ اینستاگرام: لینکِ پست + متن → ثبتِ کمپینِ کامنت→دایرکت
     if config.IG_CAMPAIGN_GROUP_ID and m.chat_id == config.IG_CAMPAIGN_GROUP_ID:
+        # اول: دستورِ ساختِ کپشن/پیام با هوش مصنوعی (فقط با کلیدواژهٔ صریح فعال می‌شود)
+        cmd = _caption_cmd(m.text or m.caption or "")
+        if cmd:
+            await _handle_ig_caption_cmd(m, cmd[0], cmd[1])
+            return
         await _handle_ig_campaign_group(m)
         return
-    # ریپلایِ همکار روی «ارجاعِ عکس» → پاسخ به مشتری در همان کانال (متن)
-    if config.STAFF_GROUP_ID and m.chat_id == config.STAFF_GROUP_ID and m.reply_to_message:
+    # ریپلایِ اپراتور روی «اتصالِ زنده» → رله به مشتری؛ یا فرمانِ «پایان» → بازگشت به AI
+    if m.reply_to_message and m.chat_id in {config.SUPPORT_GROUP_ID, config.STAFF_GROUP_ID}:
+        h = _handoffs.get(m.reply_to_message.message_id)
+        if h:
+            answer = (m.text or m.caption or "").strip()
+            if answer and (_norm_end(answer) in _HANDOFF_END_WORDS or _HANDOFF_END_RE.match(answer)):
+                await end_handoff(context.bot, h["channel"], h["customer_id"])
+                try:
+                    await m.reply_text("✅ اتصالِ زنده بسته شد؛ گفتگو به دستیارِ هوشمند بازگشت.")
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            if answer:
+                import assistant
+                txt = await assistant.polish_staff_reply(answer, "") or answer
+                if h["channel"] == "telegram":
+                    try:
+                        await context.bot.send_message(int(h["customer_id"]), txt)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[tg] رله‌ی پاسخِ اپراتور به مشتری ناموفق: {e}")
+                else:
+                    await _notify_channel(h["channel"], h["customer_id"], txt)
+            return
+    # ریپلایِ همکار روی «ارجاعِ عکس/سوالِ مشتری» (حالا در گروهِ CRM) → پاسخ به مشتری در همان کانال
+    if m.reply_to_message and m.chat_id in {config.SUPPORT_GROUP_ID, config.STAFF_GROUP_ID}:
         esc = _escalations.get(m.reply_to_message.message_id)
         if esc:
             answer = (m.text or m.caption or "").strip()
@@ -675,6 +888,11 @@ async def _deliver(context, msg, user, source_text, answer, ctx):
     wa = _wrist_answer(ctx)  # متنِ قطعیِ مچ‌دست؛ متنِ احتمالاً‌غلطِ مدل را override می‌کند
     if wa:
         answer = wa
+    try:
+        import tgstore
+        tgstore.record(user.id if user else "", _full_name(user) if user else "", source_text, answer)
+    except Exception:  # noqa: BLE001
+        pass
     if answer:
         await msg.reply_text(answer, disable_web_page_preview=bool(cards))
     if cards:
@@ -707,6 +925,11 @@ async def _deliver(context, msg, user, source_text, answer, ctx):
     if ctx.get("handoff"):
         await _post_support_request(context, user, source_text, ctx["handoff"])  # لیستِ مرتب در گروه
         await _notify_admins(context, user, source_text, ctx["handoff"])         # هشدار به ادمین‌ها
+        # اتصالِ زندهٔ دوطرفه: چت را به اپراتور بسپار و پاسخِ خودکارِ AI روی این چت خاموش شود
+        await start_handoff(context.bot, "telegram", msg.chat_id,
+                            name=(user.first_name if user else "") or "",
+                            first_message=source_text or "",
+                            reason=(ctx["handoff"] or {}).get("reason", ""))
 
 
 async def _handle_wrist(context, msg, user, product_id):
@@ -756,6 +979,11 @@ async def _on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user = update.effective_user
     _cancel_followup(user.id)  # کاربر فعال است → فالوآپِ معلق را لغو کن
+    # حین اتصالِ زنده به اپراتور: AI خاموش است؛ پیامِ کاربر را به گروه رله کن و جواب نده
+    if is_handoff_active("telegram", msg.chat_id):
+        await relay_user_to_group(context.bot, "telegram", msg.chat_id, msg.text,
+                                  (user.first_name if user else "") or "")
+        return
     text = msg.text
     # اگر به کارتِ محصول ریپلای کرده:
     if msg.reply_to_message:
@@ -800,6 +1028,10 @@ async def _on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user = update.effective_user
     _cancel_followup(user.id)
+    if is_handoff_active("telegram", msg.chat_id):  # حین اتصالِ زنده: به اپراتور خبر بده، AI جواب ندهد
+        await relay_user_to_group(context.bot, "telegram", msg.chat_id, "📷 [عکس فرستاد]",
+                                  (user.first_name if user else "") or "")
+        return
     # اگر منتظرِ فیشِ پرداختِ این کاربریم، این عکس را به‌عنوانِ فیش پردازش کن (نه جستجوی ساعت)
     pending = _pending_orders.pop(user.id, None)
     if pending:
@@ -829,6 +1061,10 @@ async def _on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user = update.effective_user
     _cancel_followup(user.id)
+    if is_handoff_active("telegram", msg.chat_id):  # حین اتصالِ زنده: به اپراتور خبر بده، AI جواب ندهد
+        await relay_user_to_group(context.bot, "telegram", msg.chat_id, "🎧 [ویس فرستاد]",
+                                  (user.first_name if user else "") or "")
+        return
     await context.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
     try:
         f = await voice.get_file()
