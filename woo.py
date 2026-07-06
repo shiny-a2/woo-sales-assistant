@@ -498,6 +498,61 @@ def site_search_link(gender=None, style=None, dial_color=None, strap_color=None,
     return config.WOO_URL.rstrip("/") + "/نتایج-جستجو/?a2ps=" + urllib.parse.quote_plus(terms)
 
 
+def _local_candidates(gender=None, brand=None, dial_color=None, movement=None, style=None,
+                      strap_color=None, case_color=None, strap_material=None, query=None,
+                      on_sale=False, in_stock_only=True, min_toman=None, max_toman=None, newest=False):
+    """کاندیداهای محلی (جای کوئریِ ووکامرس) از ایندکس — فیلترِ ویژگیِ مبنا + موجودی/قیمت/حراج.
+    downstreamِ search_watches بقیهٔ پالایش را (بی‌تغییر) روی این‌ها انجام می‌دهد."""
+    import productindex
+    prods = productindex.all_products()
+    if not prods:
+        return None
+    prim = None
+    for key, val, attr in (("dial_color", dial_color, "رنگ صفحه"), ("movement", movement, "نوع موتور"),
+                           ("brand", brand, "نام برند"), ("style", style, None),
+                           ("strap_color", strap_color, "رنگ بند"), ("case_color", case_color, "رنگ قاب"),
+                           ("strap_material", strap_material, "طرح بند")):
+        if val:
+            prim = (key, val, attr)
+            break
+    lo = int(min_toman) if min_toman else None
+    hi = int(max_toman) if max_toman else None
+    out = []
+    for p in prods:
+        if in_stock_only and p.get("stock_status") != "instock":
+            continue
+        if on_sale and not p.get("on_sale"):
+            continue
+        if lo or hi:
+            pt = _to_toman(p.get("price"))
+            if pt:
+                if lo and pt < lo:
+                    continue
+                if hi and pt > hi:
+                    continue
+        if prim:
+            key, val, attr = prim
+            if key == "style":
+                cats = [c.get("name", "") for c in (p.get("categories") or [])]
+                if not (("ساعت " + val) in cats or val in (p.get("name", ""))):
+                    continue
+            elif key == "strap_material":
+                designs = _STRAP_DESIGN.get(val, [val])
+                if not (any(any(d in (o or "") for d in designs) for o in attr_options(p, "طرح بند"))
+                        or any(val in (o or "") for o in attr_options(p, "جنس بکارگرفته"))):
+                    continue
+            else:
+                if not any(val in (o or "") or (o or "") in val for o in attr_options(p, attr)):
+                    continue
+        elif query:
+            if query.strip().lower() not in (p.get("name", "").lower()):
+                continue
+        out.append(p)
+    if newest:
+        out.sort(key=lambda p: p.get("date_created", ""), reverse=True)
+    return out
+
+
 async def search_watches(gender=None, movement=None, dial_color=None, strap_color=None,
                          case_color=None, strap_material=None, brand=None, style=None,
                          min_toman=None, max_toman=None, target_toman=None, query=None,
@@ -541,38 +596,49 @@ async def search_watches(gender=None, movement=None, dial_color=None, strap_colo
     if strap_material:
         strap_material = _STRAP_MAT.get(strap_material.strip(), strap_material.strip())
 
-    params = {"status": "publish", "orderby": "date" if newest else "popularity",
-              "order": "desc", "per_page": 60}
-    if in_stock_only:
-        params["stock_status"] = "instock"
-    if on_sale:
-        params["on_sale"] = True
-    if min_toman:
-        params["min_price"] = str(int(min_toman) * config.MONEY_DIVISOR)
-    if max_toman:
-        params["max_price"] = str(int(max_toman) * config.MONEY_DIVISOR)
-
-    # یک فیلترِ گزینشی به‌عنوان مبنای کوئری (محدودیت تک‌ویژگیِ ووکامرس)
+    # مسیرِ سریع: ایندکسِ محلیِ محصولات (اگر داده دارد) — بدونِ زدن به هاستِ کندِ سایت
+    items = None
     primary = None
-    for key, val in (("dial_color", dial_color), ("movement", movement), ("brand", brand),
-                     ("style", style), ("strap_color", strap_color), ("case_color", case_color),
-                     ("strap_material", strap_material)):
-        if val:
-            attr_id, taxonomy = _WATCH_ATTR[key]
-            ids = await _strap_design_ids(val) if key == "strap_material" else await _match_term_ids(attr_id, val)
-            if ids:
-                params["attribute"] = taxonomy
-                params["attribute_term"] = ",".join(str(i) for i in ids)
-                primary = key
-                break
+    try:
+        import productindex
+        if productindex.is_fresh():
+            items = _local_candidates(gender=gender, brand=brand, dial_color=dial_color,
+                                      movement=movement, style=style, strap_color=strap_color,
+                                      case_color=case_color, strap_material=strap_material,
+                                      query=query, on_sale=on_sale, in_stock_only=in_stock_only,
+                                      min_toman=min_toman, max_toman=max_toman, newest=newest)
+    except Exception:  # noqa: BLE001
+        items = None
 
-    if not primary:
-        if query:
-            params["search"] = query
-        elif gender and gender in _WATCH_CAT:
-            params["category"] = _WATCH_CAT[gender]
-
-    items = await get("products", params)
+    if items is None:   # fallback: ووکامرسِ زنده (term-id + کوئری)
+        params = {"status": "publish", "orderby": "date" if newest else "popularity",
+                  "order": "desc", "per_page": 60}
+        if in_stock_only:
+            params["stock_status"] = "instock"
+        if on_sale:
+            params["on_sale"] = True
+        if min_toman:
+            params["min_price"] = str(int(min_toman) * config.MONEY_DIVISOR)
+        if max_toman:
+            params["max_price"] = str(int(max_toman) * config.MONEY_DIVISOR)
+        # یک فیلترِ گزینشی به‌عنوان مبنای کوئری (محدودیت تک‌ویژگیِ ووکامرس)
+        for key, val in (("dial_color", dial_color), ("movement", movement), ("brand", brand),
+                         ("style", style), ("strap_color", strap_color), ("case_color", case_color),
+                         ("strap_material", strap_material)):
+            if val:
+                attr_id, taxonomy = _WATCH_ATTR[key]
+                ids = await _strap_design_ids(val) if key == "strap_material" else await _match_term_ids(attr_id, val)
+                if ids:
+                    params["attribute"] = taxonomy
+                    params["attribute_term"] = ",".join(str(i) for i in ids)
+                    primary = key
+                    break
+        if not primary:
+            if query:
+                params["search"] = query
+            elif gender and gender in _WATCH_CAT:
+                params["category"] = _WATCH_CAT[gender]
+        items = await get("products", params)
     exclude = set(int(i) for i in (exclude_ids or []) if str(i).isdigit())
 
     rows = []  # جفت (brief, raw) تا به ویژگی‌های خام دسترسی باشد

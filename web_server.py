@@ -79,6 +79,12 @@ async def chat(body: ChatIn):
     sid = (body.session_id or "anon").strip()[:64]
     answer, ctx = await assistant.reply(
         CHANNEL, sid, body.message, user_name=(body.name or None), customer_phone=(body.phone or None))
+    cards = ctx.get("cards") or []
+    if cards:   # ویجتِ سایت فقط متن نشان می‌دهد → کارت‌ها را مثلِ واتساپ/اینستاگرام به‌صورتِ متن ضمیمه کن
+        try:
+            answer = (answer + "\n\n" + assistant._cards_as_text(cards)).strip()
+        except Exception:  # noqa: BLE001
+            pass
     if ctx.get("handoff"):
         await _notify_admins(sid, body.message, ctx["handoff"])
     try:  # ثبت برای پایشِ چتِ سایت در داشبورد
@@ -342,6 +348,25 @@ async def brain_funnel(x_sb_token: str = Header(None, alias="X-SB-Token")):
     return out
 
 
+@app.get("/api/brain/products/status")
+async def brain_products_status(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """وضعیتِ ایندکسِ محلیِ محصولات (تعداد، سنِ داده، بازهٔ به‌روزرسانی)."""
+    _check_sb_token(x_sb_token)
+    import productindex
+    return {"ok": True, **productindex.status()}
+
+
+@app.post("/api/brain/products/sync")
+async def brain_products_sync(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """به‌روزرسانیِ فوریِ ایندکسِ محصولات (دکمهٔ «به‌روزرسانیِ الان»)."""
+    _check_sb_token(x_sb_token)
+    import productindex
+    if productindex.status()["syncing"]:
+        return {"ok": False, "error": "همگام‌سازی هم‌اکنون در حالِ اجراست"}
+    asyncio.create_task(productindex.sync(force=True))
+    return {"ok": True, "started": True}
+
+
 @app.get("/api/client/me")
 async def brain_me(x_sb_token: str = Header(None, alias="X-SB-Token")):
     _check_sb_token(x_sb_token)
@@ -451,6 +476,7 @@ class BrainSettingsIn(BaseModel):
     ab_enabled: bool | None = None         # آزمونِ A/B لحنِ مغز
     ab_variant_a: str | None = None        # دستورِ لحنِ گروه A (خالی = پیش‌فرض)
     ab_variant_b: str | None = None        # دستورِ لحنِ گروه B
+    product_sync_hours: float | None = None  # بازهٔ به‌روزرسانیِ ایندکسِ محلیِ محصولات (ساعت)
 
 
 @app.get("/api/brain/settings")
@@ -464,6 +490,7 @@ async def brain_settings_get(x_sb_token: str = Header(None, alias="X-SB-Token"))
             "ab_enabled": bool(__import__("salescfg").get("ab_enabled", False)),
             "ab_variant_a": __import__("salescfg").get("ab_variant_a", ""),
             "ab_variant_b": __import__("salescfg").get("ab_variant_b", ""),
+            "product_sync_hours": float(__import__("salescfg").get("product_sync_hours", 8) or 8),
             "available_models": await _available_models(),
             "reasoning": getattr(config, "OPENAI_REASONING_EFFORT", ""),
             "max_tokens": getattr(config, "OPENAI_MAX_COMPLETION_TOKENS", "")}
@@ -501,6 +528,10 @@ async def brain_settings_set(body: BrainSettingsIn, x_sb_token: str = Header(Non
             kw["ab_variant_b"] = body.ab_variant_b.strip()
         salescfg.set_many(**kw)
         saved.append("ab_test")
+    if body.product_sync_hours is not None:
+        import salescfg
+        salescfg.set_many(product_sync_hours=max(0.25, min(float(body.product_sync_hours), 168)))
+        saved.append("product_sync_hours")
     return {"ok": True, "saved": saved}
 
 
@@ -697,6 +728,22 @@ async def _post_daily_report_to_tg():
         print(f"[sales-ai] خطای ارسالِ گزارشِ روزانه: {e!r}")
 
 
+async def _product_sync_loop():
+    """کاتالوگ را در پس‌زمینه محلی نگه دار: اول اگر لازم بود بگیر، بعد طبقِ بازهٔ تنظیمی تازه کن."""
+    await asyncio.sleep(20)
+    import productindex
+    while True:
+        try:
+            st = productindex.status()
+            stale = (st["count"] == 0) or (st["age_min"] is None) or (st["age_min"] > productindex.refresh_hours() * 60)
+            if stale and not st["syncing"]:
+                print("[productindex] همگام‌سازیِ کاتالوگ…")
+                print("[productindex]", await productindex.sync())
+        except Exception as e:  # noqa: BLE001
+            print(f"[productindex] خطای حلقه: {e!r}")
+        await asyncio.sleep(900)   # هر ۱۵ دقیقه چک (sync خودش طبقِ سن تصمیم می‌گیرد)
+
+
 async def _daily_analysis_loop():
     """گزارشِ مدیریتیِ فروش را روزی یک‌بار (بعد از ساعتِ مقرر) خودکار بساز + به مدیر در تلگرام بفرست."""
     await asyncio.sleep(90)  # صبر تا سرویس کامل بالا بیاید
@@ -716,6 +763,7 @@ async def serve(tg_app=None):
     _tg_app = tg_app
     asyncio.create_task(_daily_analysis_loop())  # زمان‌بندِ تحلیلِ روزانه
     asyncio.create_task(_hot_lead_alert_loop())  # هشدارِ لحظه‌ایِ مشتریِ داغ به گروهِ CRM
+    asyncio.create_task(_product_sync_loop())    # ایندکسِ محلیِ محصولات (جستجوی آنی)
     # log_config=None تا uvicorn لاگینگ را روی stdout بازپیکربندی نکند (با لاگ تهرانِ main تداخل دارد)
     cfg = uvicorn.Config(app, host=config.WEB_HOST, port=config.WEB_PORT, log_level="warning", log_config=None)
     server = uvicorn.Server(cfg)
