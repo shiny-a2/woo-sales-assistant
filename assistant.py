@@ -308,6 +308,8 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
         return ("", {})
 
     ctx: dict = {}
+    if reply_context and (reply_context.get("name") or "").strip():
+        ctx["reacted_product"] = reply_context["name"].strip()   # ری‌اکشنِ کاربر به کارتِ این محصول (برای آمارِ تقاضا)
     # ردگیریِ کارت‌های نشان‌داده‌شده per (channel,user) → عدمِ‌تکرار + صفحه‌بندیِ ۷→۵→۳ روی کانال‌ها
     _ck = (str(customer.get("channel") or "ch"), str(customer.get("id"))) if (customer and customer.get("id")) else None
     if _ck:

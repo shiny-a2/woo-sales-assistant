@@ -93,6 +93,18 @@ def normalize_text(text):
     return " ".join(out) if changed else text
 
 
+def find_in_text(text):
+    """برندهایی که کاربر در متنش نام برده (با هر مستعار/مخفف) — خروجی: نام‌های کاملِ فارسی، بدونِ تکرار."""
+    if not text:
+        return []
+    padded = " " + _norm(text) + " "
+    found = []
+    for alias_n, canon in _INDEX.items():
+        if len(alias_n) >= 2 and (" " + alias_n + " ") in padded and canon not in found:
+            found.append(canon)
+    return found
+
+
 def aliases_hint(limit=10):
     """چند نمونهٔ پرکاربرد برای راهنماییِ پرسونا (تا مدل خودش هم نرمال کند)."""
     ex = []

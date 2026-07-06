@@ -107,11 +107,25 @@ def record(channel, cid, name, user_msg, ctx):
         pos = _hits(text, _POS)
         neg = _hits(text, _NEG)
         order = bool(ctx.get("order"))
-        cards = ctx.get("cards") or []
-        products = [(c.get("name") or c.get("title") or "").strip() for c in cards if (c.get("name") or c.get("title"))][:5]
-        # برند: از متنِ مشتری + نامِ محصولاتِ نشان‌داده‌شده
-        blob = text + " " + " ".join(products).lower()
-        brands = [b for b in _BRANDS if b.lower() in blob]
+        # «محصولِ پرتقاضا» فقط از خواسته/ری‌اکشنِ خودِ کاربر شمرده می‌شود، نه هر کارتی که ما نشان دادیم:
+        #   ریپلای/اشاره به کارتِ یک محصول، درخواستِ عکسِ روی مچِ همان، یا ثبتِ سفارشش.
+        products = []
+        rp = (ctx.get("reacted_product") or "").strip()
+        if rp:
+            products.append(rp)
+        wm = ctx.get("wrist_media") or {}
+        if isinstance(wm, dict) and (wm.get("product_name") or "").strip():
+            products.append(wm["product_name"].strip())
+        od = ctx.get("order") or {}
+        if isinstance(od, dict) and (od.get("product") or "").strip():
+            products.append(od["product"].strip())
+        products = list(dict.fromkeys(products))[:5]
+        # برند: فقط از متنِ خودِ کاربر (با تشخیصِ نام‌های مستعار/انگلیسی)
+        try:
+            import brands as _brmod
+            brands = _brmod.find_in_text(user_msg or "")
+        except Exception:  # noqa: BLE001
+            brands = [b for b in _BRANDS if b.lower() in text]
 
         level = "high" if (order or len(buy) >= 2) else ("med" if buy else "low")
         sentiment = "pos" if len(pos) > len(neg) else ("neg" if len(neg) > len(pos) else "neu")
