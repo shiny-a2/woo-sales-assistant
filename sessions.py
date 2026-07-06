@@ -1,12 +1,16 @@
 """حافظه‌ی گفتگوی هر کاربر (در حافظه‌ی فرایند، با محدودکردن طول)."""
 from __future__ import annotations
 
+import time
+
 import config
 
 # کلید: "channel:user_id" → فهرست پیام‌ها به فرمت OpenAI ({"role","content"})
 _STORE: dict[str, list] = {}
 # کلید: "channel:user_id" → فهرست آیدیِ محصولاتِ قبلاً نشان‌داده‌شده (برای نتایج غیرتکراری)
 _SHOWN: dict[str, list] = {}
+# کلید: "channel:user_id" → epochِ آخرین فعالیت (برای قانونِ سلامِ ۶ ساعته)
+_LAST_ACT: dict[str, float] = {}
 
 
 def _key(channel, user_id):
@@ -42,6 +46,15 @@ def add_shown(channel, user_id, ids):
         del lst[: len(lst) - 200]
 
 
+def touch_activity(channel, user_id):
+    """زمانِ فعالیتِ این گفتگو را «حالا» کن و زمانِ قبلی را برگردان (برای محاسبهٔ فاصله؛ None اگر اولین‌بار)."""
+    k = _key(channel, user_id)
+    prev = _LAST_ACT.get(k)
+    _LAST_ACT[k] = time.time()
+    return prev
+
+
 def reset(channel, user_id):
     _STORE.pop(_key(channel, user_id), None)
     _SHOWN.pop(_key(channel, user_id), None)
+    _LAST_ACT.pop(_key(channel, user_id), None)

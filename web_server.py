@@ -4,6 +4,9 @@
 """
 from __future__ import annotations
 
+import asyncio
+import os
+from collections import deque
 from typing import Any
 
 import uvicorn
@@ -12,13 +15,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
+import time
+
 import assistant
 import botusers
 import config
 import llm
+import modelcfg
+import persona
+
+_models_cache = {"at": 0.0, "list": []}
+
+
+async def _available_models():
+    """فهرستِ مدل‌های چت/عکسِ حسابِ OpenAI (زنده، با کشِ ۵ دقیقه‌ای)."""
+    if time.time() - _models_cache["at"] < 300 and _models_cache["list"]:
+        return _models_cache["list"]
+    try:
+        resp = await llm.client().models.list()
+        bad = ("embedding", "tts", "whisper", "audio", "realtime", "image", "dall-e", "moderation", "transcribe", "search", "codex", "computer")
+        ids = sorted({m.id for m in resp.data if m.id.startswith(("gpt-", "o1", "o3", "o4")) and not any(b in m.id for b in bad)})
+        _models_cache["at"] = time.time()
+        _models_cache["list"] = ids
+        return ids
+    except Exception as e:  # noqa: BLE001
+        print(f"[brain] fetch models failed: {type(e).__name__}: {e}")
+        return _models_cache["list"]
 
 CHANNEL = "web"
 _tg_app = None  # برای ارجاع به ادمین از طریق تلگرام (هنگام serve ست می‌شود)
+_site_chats = deque(maxlen=80)  # آخرین گفتگوهای چتِ سایت برای پایش در داشبورد
+_bcast = {"running": False, "sent": 0, "failed": 0, "total": 0, "stop": False}  # وضعیتِ ارسالِ گروهیِ تلگرام
 
 app = FastAPI(title="Javaherian Sales Assistant")
 app.add_middleware(
@@ -54,6 +81,12 @@ async def chat(body: ChatIn):
         CHANNEL, sid, body.message, user_name=(body.name or None), customer_phone=(body.phone or None))
     if ctx.get("handoff"):
         await _notify_admins(sid, body.message, ctx["handoff"])
+    try:  # ثبت برای پایشِ چتِ سایت در داشبورد
+        import clock
+        _site_chats.appendleft({"t": clock.tehran_now().strftime("%m-%d %H:%M"), "sid": sid,
+                                "name": (body.name or "").strip(), "q": (body.message or "")[:200], "a": (answer or "")[:400]})
+    except Exception:  # noqa: BLE001
+        pass
     return JSONResponse({"reply": answer})
 
 
@@ -94,6 +127,221 @@ def _check_sb_token(token):
         raise HTTPException(status_code=401, detail="invalid token")
 
 
+class RecoveryNotifyIn(BaseModel):
+    text: str = ""                       # کارتِ خوانا برای همکاران (HTML)
+    wa_link: str = ""                    # لینکِ آمادهٔ web.whatsapp.com/send با پیامِ پرشده
+    button_text: str = "📲 ارسال در واتساپ‌وب"
+
+
+@app.post("/api/recovery-notify")
+async def recovery_notify(body: RecoveryNotifyIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """کارتِ بازیابیِ سبدِ رها را با دکمهٔ آمادهٔ web.whatsapp.com در گروهِ «پیگیری مشتریان و CRM» پست می‌کند."""
+    _check_sb_token(x_sb_token)
+    if not _tg_app:
+        return {"ok": False, "error": "telegram not ready"}
+    gid = config.ORDERS_GROUP_ID or config.SUPPORT_GROUP_ID or config.STAFF_GROUP_ID
+    if not gid:
+        return {"ok": False, "error": "no group configured"}
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(body.button_text, url=body.wa_link)]]) if body.wa_link else None
+    try:
+        sent = await _tg_app.bot.send_message(gid, body.text or "🛒 بازیابیِ سبدِ رها", reply_markup=kb,
+                                              parse_mode="HTML", disable_web_page_preview=True)
+        return {"ok": True, "message_id": sent.message_id}
+    except Exception as e:  # noqa: BLE001
+        print(f"[brain] پستِ بازیابی به گروه ناموفق: {type(e).__name__}: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/brain/performance")
+async def brain_performance(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """عملکردِ روزانهٔ ربات فروش: پاسخ‌ها به‌تفکیکِ کانال + سفارش/رسید/ارجاع/مدیا + کاربران."""
+    _check_sb_token(x_sb_token)
+    import metrics
+    snap = metrics.snapshot()
+    try:
+        snap["users"] = botusers.counts()
+    except Exception:  # noqa: BLE001
+        snap["users"] = {}
+    snap["ok"] = True
+    return snap
+
+
+@app.get("/api/brain/analytics")
+async def brain_analytics(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """تحلیلِ رفتار و خواستهٔ مشتری: محصول/برندِ پرتقاضا، سیگنالِ خرید، اعتراض/ریزش، حال‌وهوا، مشتریانِ داغ."""
+    _check_sb_token(x_sb_token)
+    import analytics
+    snap = analytics.snapshot()
+    snap["ok"] = True
+    return snap
+
+
+class MgrChatIn(BaseModel):
+    question: str = ""
+    model: str | None = None
+    history: list = []
+    image_b64: str = ""     # فایل/تصویرِ اختیاری برای تحلیل
+    mime: str = "image/jpeg"
+
+
+@app.get("/api/brain/sales-report")
+async def brain_sales_report(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """آخرین گزارشِ مدیریتیِ فروش (روزی یک‌بار خودکار ساخته می‌شود) + تاریخچهٔ کوتاه."""
+    _check_sb_token(x_sb_token)
+    import sales_ai
+    rec = sales_ai.latest()
+    if not isinstance(rec, dict):
+        rec = {"ok": False}
+    rec["history"] = sales_ai.history()[:12]
+    return rec
+
+
+@app.post("/api/brain/sales-report/run")
+async def brain_sales_report_run(body: MgrChatIn | None = None, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """ساختِ فوریِ گزارش — دکمهٔ «تحلیلِ الان» در داشبورد (با مدلِ انتخابی یا پیش‌فرض gpt-5.5)."""
+    _check_sb_token(x_sb_token)
+    import sales_ai
+    mdl = (body.model if body else None) or None
+    return await sales_ai.run_analysis(model=mdl)
+
+
+@app.post("/api/brain/mgr-chat")
+async def brain_mgr_chat(body: MgrChatIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """چتِ مدیریتی: پاسخِ دقیق به سوالِ مدیر «طبقِ آمار و گزارش»."""
+    _check_sb_token(x_sb_token)
+    import sales_ai
+    ans = await sales_ai.ask(body.question, model=body.model, history_msgs=body.history,
+                             image_b64=(body.image_b64 or None), mime=body.mime)
+    return {"ok": True, "answer": ans}
+
+
+class TgBroadcastIn(BaseModel):
+    text: str = ""
+    min_delay: float = 1.5
+    max_delay: float = 3.5
+    file_b64: str = ""     # فایلِ اختیاری (عکس/سند) — base64
+    file_name: str = ""
+    mime: str = ""
+
+
+async def _run_broadcast(text, dmin, dmax, file_bytes=None, file_name="", is_image=False):
+    """ارسالِ گروهیِ ضدبلاک به همهٔ کاربرانِ رباتِ فروش (متن و/یا فایل). file_id بعد از بارِ اول بازاستفاده می‌شود."""
+    import random
+    ids = botusers.all_ids()
+    _bcast.update({"running": True, "sent": 0, "failed": 0, "total": len(ids), "stop": False})
+    file_id = None
+    cap = text or None
+    try:
+        for uid in ids:
+            if _bcast["stop"] or not _tg_app:
+                break
+            try:
+                if file_bytes is not None:
+                    src = file_id if file_id else bytes(file_bytes)
+                    if is_image:
+                        m = await _tg_app.bot.send_photo(int(uid), photo=src, caption=cap)
+                        if file_id is None and m and m.photo:
+                            file_id = m.photo[-1].file_id
+                    else:
+                        m = await _tg_app.bot.send_document(int(uid), document=src, filename=file_name or "file", caption=cap)
+                        if file_id is None and m and getattr(m, "document", None):
+                            file_id = m.document.file_id
+                else:
+                    await _tg_app.bot.send_message(int(uid), text, disable_web_page_preview=True)
+                _bcast["sent"] += 1
+            except Exception:  # noqa: BLE001
+                _bcast["failed"] += 1
+            await asyncio.sleep(random.uniform(dmin, dmax))
+    finally:
+        _bcast["running"] = False
+
+
+@app.get("/api/brain/tg/overview")
+async def brain_tg_overview(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """تبِ رباتِ فروشِ تلگرام: گفتگوها + کاربران + پاسخ‌ها + وضعیتِ ارسالِ گروهی."""
+    _check_sb_token(x_sb_token)
+    import tgstore
+    snap = tgstore.snapshot()
+    snap["ok"] = True
+    snap["users_total"] = botusers.counts()
+    try:
+        import metrics
+        m = metrics.snapshot()
+        snap["replies_today"] = (m.get("today") or {}).get("reply:telegram", 0)
+        snap["replies_total"] = (m.get("totals") or {}).get("reply:telegram", 0)
+    except Exception:  # noqa: BLE001
+        pass
+    snap["broadcast"] = {k: _bcast.get(k) for k in ("running", "sent", "failed", "total")}
+    return snap
+
+
+@app.post("/api/brain/tg/broadcast")
+async def brain_tg_broadcast(body: TgBroadcastIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """ارسالِ پیام به همهٔ اعضای رباتِ فروش (ضدبلاک، در پس‌زمینه)."""
+    _check_sb_token(x_sb_token)
+    if not _tg_app:
+        return {"ok": False, "error": "تلگرام متصل نیست"}
+    if _bcast["running"]:
+        return {"ok": False, "error": "یک ارسالِ گروهی در حالِ اجراست"}
+    text = (body.text or "").strip()
+    file_bytes = None
+    is_image = False
+    if body.file_b64:
+        import base64
+        try:
+            file_bytes = base64.b64decode(body.file_b64)
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "error": "فایل نامعتبر است"}
+        is_image = (body.mime or "").startswith("image/")
+    if not text and file_bytes is None:
+        return {"ok": False, "error": "متن یا فایل بده"}
+    dmin = max(0.5, float(body.min_delay or 1.5))
+    dmax = max(dmin, float(body.max_delay or 3.5))
+    asyncio.create_task(_run_broadcast(text, dmin, dmax, file_bytes, body.file_name, is_image))
+    return {"ok": True, "total": len(botusers.all_ids())}
+
+
+@app.post("/api/brain/tg/broadcast/stop")
+async def brain_tg_broadcast_stop(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    _check_sb_token(x_sb_token)
+    _bcast["stop"] = True
+    return {"ok": True}
+
+
+@app.get("/api/brain/funnel")
+async def brain_funnel(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """قیفِ فروش به‌تفکیکِ کانال: پاسخ → مشتریِ داغ → سفارش → رسیدِ پرداخت + نرخِ تبدیل + فروشِ واقعیِ سایت."""
+    _check_sb_token(x_sb_token)
+    import analytics
+    import metrics
+    T = metrics.snapshot().get("totals", {})
+    an = analytics.snapshot()
+    leads_by_ch: dict = {}
+    for l in (an.get("hot_leads") or []):
+        c = l.get("ch", "")
+        leads_by_ch[c] = leads_by_ch.get(c, 0) + 1
+    rows = []
+    for ch in ("whatsapp", "instagram", "telegram", "web"):
+        replies = T.get(f"reply:{ch}", 0)
+        orders = T.get(f"order:{ch}", 0)
+        rows.append({"channel": ch, "replies": replies, "hot": leads_by_ch.get(ch, 0),
+                     "orders": orders, "receipts": T.get(f"receipt:{ch}", 0),
+                     "conversion": round(orders / replies * 100, 1) if replies else 0.0})
+    out = {"ok": True, "channels": rows,
+           "total": {"replies": T.get("reply", 0), "orders": T.get("order", 0), "receipts": T.get("receipt", 0)}}
+    import salescfg
+    out["ab"] = {"enabled": bool(salescfg.get("ab_enabled", False)),
+                 "A": {"replies": T.get("ab:A", 0), "orders": T.get("ab_order:A", 0)},
+                 "B": {"replies": T.get("ab:B", 0), "orders": T.get("ab_order:B", 0)}}
+    try:
+        import sales_ai
+        out["woo"] = await sales_ai._woo_sales()
+    except Exception:  # noqa: BLE001
+        out["woo"] = {}
+    return out
+
+
 @app.get("/api/client/me")
 async def brain_me(x_sb_token: str = Header(None, alias="X-SB-Token")):
     _check_sb_token(x_sb_token)
@@ -101,9 +349,28 @@ async def brain_me(x_sb_token: str = Header(None, alias="X-SB-Token")):
     return {"ok": True, "client": {"name": "javaherian-sale-brain", "quota_used": 0, "quota_limit": 0}}
 
 
+def _last_user_content(messages):
+    for m in reversed(messages or []):
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", "")
+        if role == "user":
+            return (m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or ""
+    return ""
+
+
 @app.post("/api/chat")
 async def brain_chat(body: BrainChatIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
     _check_sb_token(x_sb_token)
+    cust = body.customer or {}
+    _ch, _cid = (cust.get("channel") or ""), str(cust.get("id") or "")
+    # حین اتصالِ زندهٔ فعال به اپراتور: پیامِ کاربر را به گروه رله کن و AI را اصلاً صدا نزن
+    if _ch and _cid and _tg_app:
+        import telegram_bot as _tb
+        if _tb.is_handoff_active(_ch, _cid):
+            try:
+                await _tb.relay_user_to_group(_tg_app.bot, _ch, _cid, _last_user_content(body.messages), cust.get("name", ""))
+            except Exception as e:  # noqa: BLE001
+                print(f"[brain] رله‌ی پیامِ کاربر به گروه ناموفق: {type(e).__name__}: {e}")
+            return {"text": "", "cards": [], "handoff": True, "handoff_active": True, "quota_used": 0, "quota_limit": 0}
     import time as _t
     _start = _t.monotonic()
     print(f"[brain] /api/chat دریافت شد ({len(body.messages or [])} پیام)")
@@ -112,9 +379,27 @@ async def brain_chat(body: BrainChatIn, x_sb_token: str = Header(None, alias="X-
         reply_context=body.reply_context, customer=body.customer)
     print(f"[brain] پاسخ آماده در {_t.monotonic() - _start:.1f} ثانیه (طول متن={len(text)})")
     handoff = ctx.get("handoff")
+    # مغز تصمیم به ارجاعِ زنده گرفت → اتصالِ دوطرفه را شروع کن و پیامِ «به همکار وصل شدید» بده
+    if handoff and _ch and _cid and _tg_app:
+        import telegram_bot as _tb
+        try:
+            if await _tb.start_handoff(_tg_app.bot, _ch, _cid, cust.get("name", ""),
+                                       _last_user_content(body.messages), (handoff or {}).get("reason", "")):
+                text = ("شما رو به همکارِ انسانیمون وصل کردم 👤🌟 چند لحظه صبر کنید؛ همین‌جا پاسخگوتون هستن. "
+                        "هر وقت خواستید دوباره با دستیارِ هوشمند ادامه بدید، کافیه همین‌جا بگید.")
+        except Exception as e:  # noqa: BLE001
+            print(f"[brain] شروعِ اتصالِ زنده ناموفق: {type(e).__name__}: {e}")
+    if _ch not in ("whatsapp", "instagram"):  # چتِ سایت (وب) → ثبت برای پایشِ داشبورد (کانال‌های پیام‌رسان جدا)
+        try:
+            import clock
+            _site_chats.appendleft({"t": clock.tehran_now().strftime("%m-%d %H:%M"), "sid": _cid or "web",
+                                    "name": (cust.get("name") or "").strip(),
+                                    "q": (_last_user_content(body.messages) or "")[:200], "a": (text or "")[:400]})
+        except Exception:  # noqa: BLE001
+            pass
     return {
         "text": text,
-        # دادهٔ ساختاریافته برای کانال‌هایی که خودشان رندر می‌کنند (کارت/مدیا/سفارش/ارجاع):
+        # دادهٔ ساختاریافته برای کانال‌هایی که خودшان رندر می‌کنند (کارت/مدیا/سفارش/ارجاع):
         "cards": ctx.get("cards") or [],
         "wrist_media": ctx.get("wrist_media") or None,
         "wrist_media_request": ctx.get("wrist_media_request") or None,
@@ -126,6 +411,97 @@ async def brain_chat(body: BrainChatIn, x_sb_token: str = Header(None, alias="X-
         "quota_used": 0,
         "quota_limit": 0,
     }
+
+
+class FollowupIn(BaseModel):
+    channel: str = ""
+    name: str = ""
+    messages: list = []      # [{role:'user'|'assistant', content:'...'}] — گفتگوی اخیرِ همان کانال
+
+
+@app.post("/api/followup")
+async def brain_followup(body: FollowupIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """پیامِ پیگیریِ هوشمند (نه ثابت) برای یک گفتگوی ساکت می‌سازد؛ کانال‌ها (wa/ig/tg) صدا می‌زنند."""
+    _check_sb_token(x_sb_token)
+    text = await assistant.generate_followup(body.messages, body.name, body.channel)
+    return {"ok": bool(text), "text": text}
+
+
+@app.get("/api/sitechat/recent")
+async def sitechat_recent(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """آخرین گفتگوهای چتِ سایت برای پایش در کاکپیت + شمارِ امروز (برای خلاصه/نمودار)."""
+    _check_sb_token(x_sb_token)
+    today = ""
+    try:
+        import clock
+        today = clock.tehran_now().strftime("%m-%d")
+    except Exception:  # noqa: BLE001
+        pass
+    today_count = sum(1 for x in _site_chats if today and (x.get("t") or "").startswith(today))
+    return {"ok": True, "items": list(_site_chats)[:40], "today": today_count, "buffered": len(_site_chats)}
+
+
+class BrainSettingsIn(BaseModel):
+    store_info: str | None = None
+    persona_extra: str | None = None
+    chat_model: str | None = None       # مدلِ پاسخگویی (متن)
+    vision_model: str | None = None     # مدلِ عکس
+    analysis_model: str | None = None   # مدلِ اختصاصیِ تحلیلِ فروش/مدیریتی
+    first_buyer_coupon: str | None = None  # کدِ تخفیفِ خریدِ اول (مغز در پیگیری استفاده می‌کند)
+    ab_enabled: bool | None = None         # آزمونِ A/B لحنِ مغز
+    ab_variant_a: str | None = None        # دستورِ لحنِ گروه A (خالی = پیش‌فرض)
+    ab_variant_b: str | None = None        # دستورِ لحنِ گروه B
+
+
+@app.get("/api/brain/settings")
+async def brain_settings_get(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """پرسونا/اطلاعاتِ فروشگاه + مدلِ چت و عکس + فهرستِ مدل‌های در دسترس — برای تبِ «مغز» در داشبورد."""
+    _check_sb_token(x_sb_token)
+    return {"ok": True, "store_info": persona.load_store_info(), "persona_extra": persona.load_persona_extra(),
+            "chat_model": modelcfg.chat_model(), "vision_model": modelcfg.vision_model(),
+            "analysis_model": modelcfg.analysis_model(),
+            "first_buyer_coupon": __import__("salescfg").get("first_buyer_coupon", ""),
+            "ab_enabled": bool(__import__("salescfg").get("ab_enabled", False)),
+            "ab_variant_a": __import__("salescfg").get("ab_variant_a", ""),
+            "ab_variant_b": __import__("salescfg").get("ab_variant_b", ""),
+            "available_models": await _available_models(),
+            "reasoning": getattr(config, "OPENAI_REASONING_EFFORT", ""),
+            "max_tokens": getattr(config, "OPENAI_MAX_COMPLETION_TOKENS", "")}
+
+
+@app.post("/api/brain/settings")
+async def brain_settings_set(body: BrainSettingsIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """ذخیرهٔ دستیِ اطلاعاتِ فروشگاه + دستورهای اضافیِ پرسونا از داشبورد (بلافاصله در پرامپتِ بعدی اعمال می‌شود)."""
+    _check_sb_token(x_sb_token)
+    saved = []
+    if body.store_info is not None:
+        with open(persona._STORE_INFO_PATH, "w", encoding="utf-8") as f:
+            f.write(body.store_info)
+        saved.append("store_info")
+    if body.persona_extra is not None:
+        os.makedirs(os.path.dirname(persona._PERSONA_EXTRA_PATH), exist_ok=True)
+        with open(persona._PERSONA_EXTRA_PATH, "w", encoding="utf-8") as f:
+            f.write(body.persona_extra)
+        saved.append("persona_extra")
+    if body.chat_model or body.vision_model or body.analysis_model:
+        modelcfg.set_models(chat=body.chat_model, vision=body.vision_model, analysis=body.analysis_model)  # بدونِ ری‌استارت
+        saved.append("models")
+    if body.first_buyer_coupon is not None:
+        import salescfg
+        salescfg.set_many(first_buyer_coupon=body.first_buyer_coupon.strip())
+        saved.append("first_buyer_coupon")
+    if body.ab_enabled is not None or body.ab_variant_a is not None or body.ab_variant_b is not None:
+        import salescfg
+        kw = {}
+        if body.ab_enabled is not None:
+            kw["ab_enabled"] = bool(body.ab_enabled)
+        if body.ab_variant_a is not None:
+            kw["ab_variant_a"] = body.ab_variant_a.strip()
+        if body.ab_variant_b is not None:
+            kw["ab_variant_b"] = body.ab_variant_b.strip()
+        salescfg.set_many(**kw)
+        saved.append("ab_test")
+    return {"ok": True, "saved": saved}
 
 
 class VisionIn(BaseModel):
@@ -142,6 +518,19 @@ class VisionIn(BaseModel):
 async def brain_vision(body: VisionIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
     """تشخیصِ عکسِ ساعت → جستجو و کارت. منبعِ واحد برای همهٔ کانال‌ها."""
     _check_sb_token(x_sb_token)
+    _cust = body.customer or {}
+    _ch, _cid = (_cust.get("channel") or ""), str(_cust.get("id") or "")
+    if _ch and _cid and _tg_app:  # حین اتصالِ زندهٔ فعال: عکس را به اپراتور خبر بده، AI پردازش نکند
+        import telegram_bot as _tb
+        if _tb.is_handoff_active(_ch, _cid):
+            try:
+                import base64 as _b64
+                _img = _b64.b64decode(body.image_b64) if body.image_b64 else b""
+                # عکسِ واقعی + سؤالِ همراهِ کاربر (body.caption از نزدیک‌ترین متنِ همان گفتگو ساخته شده) به اپراتور
+                await _tb.relay_user_photo_to_group(_tg_app.bot, _ch, _cid, _img, (body.caption or "").strip(), _cust.get("name", ""))
+            except Exception as e:  # noqa: BLE001
+                print(f"[brain] رله‌ی عکسِ کاربر به گروه ناموفق: {type(e).__name__}: {e}")
+            return {"text": "", "cards": [], "handoff": True, "handoff_active": True}
     data_url = ""
     if body.image_b64:
         data_url = f"data:{body.mime or 'image/jpeg'};base64," + body.image_b64.strip()
@@ -168,8 +557,8 @@ async def brain_vision(body: VisionIn, x_sb_token: str = Header(None, alias="X-S
                 name=cust.get("name", ""), amount=receipt.get("amount", ""), extra=extra)
         except Exception as e:  # noqa: BLE001
             print(f"[brain] ارسالِ رسیدِ کانالی به گروه ناموفق: {type(e).__name__}: {e}")
-    elif (not cards) and (not ctx.get("ask_gender")) and cust and body.image_b64 and _tg_app:
-        # عکس بود ولی محصولی پیدا نشد → ارجاع به همکاران (مگر فقط جنسیت پرسیده باشد)
+    elif (not cards) and (not ctx.get("ask_gender")) and (not ctx.get("not_watch")) and cust and body.image_b64 and _tg_app:
+        # ساعت بود ولی محصولی پیدا نشد → ارجاع به گروهِ عکس‌وویدئو (نه اگر جنسیت پرسیده یا اصلاً ساعت نبوده)
         try:
             import base64 as _b64
 
@@ -231,9 +620,102 @@ async def embed_js():
     return Response(content=_EMBED_JS, media_type="application/javascript")
 
 
+def _he(s):
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+async def _hot_lead_alert_loop():
+    """مشتریانِ داغِ تازه را به گروهِ «پیگیری مشتریان و CRM» خبر بده (هر ~۲ دقیقه یک چک)."""
+    await asyncio.sleep(60)
+    _ch = {"whatsapp": "🟢 واتساپ", "instagram": "📸 اینستاگرام", "telegram": "💬 تلگرام", "web": "💻 چت سایت"}
+    while True:
+        try:
+            gid = config.ORDERS_GROUP_ID or config.SUPPORT_GROUP_ID or config.STAFF_GROUP_ID
+            if _tg_app and gid:
+                import analytics
+                coupon = ""
+                try:
+                    import salescfg
+                    coupon = (salescfg.get("first_buyer_coupon") or "").strip()
+                except Exception:  # noqa: BLE001
+                    pass
+                for l in analytics.pop_new_hot_leads():
+                    ch = _ch.get(l.get("ch"), l.get("ch") or "—")
+                    prods = "، ".join(l.get("products") or [])[:140]
+                    name0 = (l.get("name") or "").strip() or "دوستِ عزیز"
+                    prod0 = (l.get("products") or [""])[0] if l.get("products") else ""
+                    sugg = (f"سلام {name0} 🌹 دیدم به "
+                            + (f"«{prod0}» " if prod0 else "ساعتِ موردنظرتون ")
+                            + "علاقه داشتید؛ اگر سوالی هست کنارتونم تا بهترین انتخاب رو داشته باشید.")
+                    if coupon:
+                        sugg += f" ضمناً برای خریدِ اول یک هدیهٔ کوچک هم داریم: کدِ تخفیفِ {coupon} 🎁"
+                    txt = ("🔥 <b>مشتریِ داغ — سیگنالِ خریدِ بالا</b>\n\n"
+                           f"کانال: {ch}\n"
+                           f"مشتری: <b>{_he(l.get('name') or l.get('cid') or '')}</b>\n"
+                           f"امتیازِ خرید: <b>{l.get('score')}</b>\n"
+                           + (f"موردِعلاقه: {_he(prods)}\n" if prods else "")
+                           + f"\n💬 آخرین پیام:\n«{_he((l.get('last_msg') or '')[:220])}»\n\n"
+                           "⏱ همین حالا پیگیری کنید — احتمالِ فروش بالاست.\n\n"
+                           "💡 <b>پیامِ آمادهٔ پیشنهادی</b> (کپی و ارسال کنید):\n<code>"
+                           + _he(sugg) + "</code>")
+                    try:
+                        await _tg_app.bot.send_message(gid, txt, parse_mode="HTML", disable_web_page_preview=True)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[hot-lead] ارسال ناموفق: {e!r}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[hot-lead] خطای حلقه: {e!r}")
+        await asyncio.sleep(120)
+
+
+async def _post_daily_report_to_tg():
+    """خلاصهٔ گزارشِ مدیریتیِ روز را به مدیر(ها) در تلگرام (دایرکت) بفرست."""
+    try:
+        if not _tg_app:
+            return
+        import sales_ai
+        rp = (sales_ai.latest() or {}).get("report") or {}
+        if not rp:
+            return
+        lines = ["📊 <b>گزارشِ روزانهٔ فروش — گالری جواهریان</b>", ""]
+        if rp.get("summary"):
+            lines.append(_he(rp["summary"]))
+        acts = rp.get("growth_actions") or []
+        if acts:
+            lines.append("\n🚀 <b>مهم‌ترین اقدام‌های امروز:</b>")
+            for a in acts[:3]:
+                lines.append(f"• {_he(a.get('title', ''))} <i>({_he(a.get('priority', ''))})</i>")
+        if rp.get("risk"):
+            lines.append(f"\n⚠️ ریسک: {_he(rp['risk'])}")
+        lines.append("\n📱 جزئیاتِ کامل در داشبوردِ مدیریتی.")
+        txt = "\n".join(lines)[:3900]
+        for uid in (getattr(config, "ADMIN_USER_IDS", []) or []):
+            try:
+                await _tg_app.bot.send_message(uid, txt, parse_mode="HTML", disable_web_page_preview=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"[sales-ai] ارسالِ گزارش به ادمین {uid} ناموفق: {e!r}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[sales-ai] خطای ارسالِ گزارشِ روزانه: {e!r}")
+
+
+async def _daily_analysis_loop():
+    """گزارشِ مدیریتیِ فروش را روزی یک‌بار (بعد از ساعتِ مقرر) خودکار بساز + به مدیر در تلگرام بفرست."""
+    await asyncio.sleep(90)  # صبر تا سرویس کامل بالا بیاید
+    while True:
+        try:
+            import sales_ai
+            if await sales_ai.maybe_run_daily():
+                print("[sales-ai] گزارشِ روزانهٔ فروش ساخته شد ✅")
+                await _post_daily_report_to_tg()   # خلاصه به مدیر در تلگرام
+        except Exception as e:  # noqa: BLE001
+            print(f"[sales-ai] خطای حلقهٔ روزانه: {e!r}")
+        await asyncio.sleep(1800)
+
+
 async def serve(tg_app=None):
     global _tg_app
     _tg_app = tg_app
+    asyncio.create_task(_daily_analysis_loop())  # زمان‌بندِ تحلیلِ روزانه
+    asyncio.create_task(_hot_lead_alert_loop())  # هشدارِ لحظه‌ایِ مشتریِ داغ به گروهِ CRM
     # log_config=None تا uvicorn لاگینگ را روی stdout بازپیکربندی نکند (با لاگ تهرانِ main تداخل دارد)
     cfg = uvicorn.Config(app, host=config.WEB_HOST, port=config.WEB_PORT, log_level="warning", log_config=None)
     server = uvicorn.Server(cfg)

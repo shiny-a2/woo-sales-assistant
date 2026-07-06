@@ -60,3 +60,8 @@ def add_started(uid):
 def counts():
     d = _load()
     return {"bot_users": len(d["users"]), "bot_started": len(d["started"])}
+
+
+def all_ids():
+    """همهٔ آیدیِ کاربرانِ رباتِ فروش (برای ارسالِ گروهی/broadcast)."""
+    return list(_load().get("users", []))
