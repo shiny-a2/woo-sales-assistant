@@ -337,9 +337,9 @@ async def brain_funnel(x_sb_token: str = Header(None, alias="X-SB-Token")):
     out = {"ok": True, "channels": rows,
            "total": {"replies": T.get("reply", 0), "orders": T.get("order", 0), "receipts": T.get("receipt", 0)}}
     import salescfg
-    out["ab"] = {"enabled": bool(salescfg.get("ab_enabled", False)),
-                 "A": {"replies": T.get("ab:A", 0), "orders": T.get("ab_order:A", 0)},
-                 "B": {"replies": T.get("ab:B", 0), "orders": T.get("ab_order:B", 0)}}
+    out["ab"] = {"enabled": bool(salescfg.get("ab_enabled", False))}
+    for k in ("A", "B", "C"):
+        out["ab"][k] = {"replies": T.get(f"ab:{k}", 0), "orders": T.get(f"ab_order:{k}", 0)}
     try:
         import sales_ai
         out["woo"] = await sales_ai._woo_sales()
@@ -473,9 +473,10 @@ class BrainSettingsIn(BaseModel):
     vision_model: str | None = None     # مدلِ عکس
     analysis_model: str | None = None   # مدلِ اختصاصیِ تحلیلِ فروش/مدیریتی
     first_buyer_coupon: str | None = None  # کدِ تخفیفِ خریدِ اول (مغز در پیگیری استفاده می‌کند)
-    ab_enabled: bool | None = None         # آزمونِ A/B لحنِ مغز
-    ab_variant_a: str | None = None        # دستورِ لحنِ گروه A (خالی = پیش‌فرض)
-    ab_variant_b: str | None = None        # دستورِ لحنِ گروه B
+    ab_enabled: bool | None = None         # آزمونِ شخصیت/لحنِ مغز (A/B/C)
+    ab_variant_a: str | None = None        # شخصیتِ A
+    ab_variant_b: str | None = None        # شخصیتِ B
+    ab_variant_c: str | None = None        # شخصیتِ C
     product_sync_hours: float | None = None  # بازهٔ به‌روزرسانیِ ایندکسِ محلیِ محصولات (ساعت)
 
 
@@ -490,6 +491,7 @@ async def brain_settings_get(x_sb_token: str = Header(None, alias="X-SB-Token"))
             "ab_enabled": bool(__import__("salescfg").get("ab_enabled", False)),
             "ab_variant_a": __import__("salescfg").get("ab_variant_a", ""),
             "ab_variant_b": __import__("salescfg").get("ab_variant_b", ""),
+            "ab_variant_c": __import__("salescfg").get("ab_variant_c", ""),
             "product_sync_hours": float(__import__("salescfg").get("product_sync_hours", 8) or 8),
             "available_models": await _available_models(),
             "reasoning": getattr(config, "OPENAI_REASONING_EFFORT", ""),
@@ -517,7 +519,7 @@ async def brain_settings_set(body: BrainSettingsIn, x_sb_token: str = Header(Non
         import salescfg
         salescfg.set_many(first_buyer_coupon=body.first_buyer_coupon.strip())
         saved.append("first_buyer_coupon")
-    if body.ab_enabled is not None or body.ab_variant_a is not None or body.ab_variant_b is not None:
+    if any(v is not None for v in (body.ab_enabled, body.ab_variant_a, body.ab_variant_b, body.ab_variant_c)):
         import salescfg
         kw = {}
         if body.ab_enabled is not None:
@@ -526,6 +528,8 @@ async def brain_settings_set(body: BrainSettingsIn, x_sb_token: str = Header(Non
             kw["ab_variant_a"] = body.ab_variant_a.strip()
         if body.ab_variant_b is not None:
             kw["ab_variant_b"] = body.ab_variant_b.strip()
+        if body.ab_variant_c is not None:
+            kw["ab_variant_c"] = body.ab_variant_c.strip()
         salescfg.set_many(**kw)
         saved.append("ab_test")
     if body.product_sync_hours is not None:
