@@ -27,30 +27,56 @@ def _client():
             consumer_key=config.WOO_CK,
             consumer_secret=config.WOO_CS,
             version="wc/v3",
-            timeout=(4, 25),  # (اتصال، خواندن) — اتصالِ سریع‌شکست تا روی نوسانِ شبکه سریع‌تر retry بزند
+            timeout=(4, 12),  # اتصال ۴، خواندن ۱۲ — سریع‌شکست تا چتِ سایت روی هاستِ کندِ ووکامرس معطل نماند
             query_string_auth=True,
         )
     return _api
 
 
 def _get_sync(endpoint, params=None):
-    # هاستِ فروشگاه گاهی اتصال را تایم‌اوت/ری‌ست می‌کند؛ چند بار تلاشِ مجدد با مکثِ کوتاه
-    # (OSError هم گرفته می‌شود تا ConnectionResetError/WinError 10054 مشتری را بی‌محصول نگذارد)
+    # هاستِ فروشگاه گاهی اتصال را ری‌ست/کند می‌کند؛ چند تلاشِ کوتاه (OSError هم گرفته می‌شود برای WinError 10054)
     last = None
-    for attempt in range(4):
+    for attempt in range(3):
         try:
             resp = _client().get(endpoint, params=params or {})
             resp.raise_for_status()
             return resp.json()
         except (RequestException, OSError) as e:
             last = e
-            if attempt < 3:
-                time.sleep(0.8 * (attempt + 1))
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
     raise last
 
 
+# کشِ کوتاهِ GET — هاستِ ووکامرس کند است (~۲ ثانیه/درخواست)؛ تکرارِ جستجوها آنی می‌شود و بارِ سایت کم
+_GET_CACHE: dict = {}
+_PRODUCT_CACHE: dict = {}   # id -> (time, raw product) — تا get_briefs (کارت‌ها) دوباره از سایت نگیرد
+_GET_TTL = 90
+
+
 async def get(endpoint, params=None):
-    return await asyncio.to_thread(_get_sync, endpoint, params)
+    import json as _json
+    key = endpoint + "?" + _json.dumps(params or {}, sort_keys=True, ensure_ascii=False)
+    ent = _GET_CACHE.get(key)
+    now = time.time()
+    if ent and (now - ent[0]) < _GET_TTL:
+        return ent[1]
+    res = await asyncio.to_thread(_get_sync, endpoint, params)
+    try:
+        _GET_CACHE[key] = (now, res)
+        if endpoint == "products" and isinstance(res, list):
+            for p in res:      # هر محصولِ خوانده‌شده را با آیدی کش کن (برای ساختِ سریعِ کارت)
+                if isinstance(p, dict) and p.get("id"):
+                    _PRODUCT_CACHE[int(p["id"])] = (now, p)
+        if len(_GET_CACHE) > 300:
+            for k in list(_GET_CACHE)[:150]:
+                _GET_CACHE.pop(k, None)
+        if len(_PRODUCT_CACHE) > 600:
+            for k in list(_PRODUCT_CACHE)[:300]:
+                _PRODUCT_CACHE.pop(k, None)
+    except Exception:  # noqa: BLE001
+        pass
+    return res
 
 
 # ---------- کمک‌تابع‌ها ----------
@@ -243,12 +269,23 @@ async def get_brand_article(brand):
 
 
 async def get_briefs(ids):
-    """خلاصه‌ی چند محصول با آیدی، در یک درخواست (برای ساخت کارت)."""
+    """خلاصه‌ی چند محصول با آیدی — اول از کشِ محصول (که هنگام جستجو پر شده) تا به سایت نزنیم و کارت سریع شود."""
     ids = [int(i) for i in (ids or []) if str(i).strip().isdigit()]
     if not ids:
         return []
-    items = await get("products", {"include": ",".join(str(i) for i in ids), "per_page": len(ids)})
-    by_id = {p.get("id"): _product_brief(p) for p in items}
+    now = time.time()
+    by_id = {}
+    missing = []
+    for i in ids:
+        ent = _PRODUCT_CACHE.get(i)
+        if ent and (now - ent[0]) < _GET_TTL:
+            by_id[i] = _product_brief(ent[1])
+        else:
+            missing.append(i)
+    if missing:   # فقط آن‌هایی که در کش نیستند را از سایت بگیر
+        items = await get("products", {"include": ",".join(str(i) for i in missing), "per_page": len(missing)})
+        for p in (items or []):
+            by_id[p.get("id")] = _product_brief(p)
     return [by_id[i] for i in ids if i in by_id]  # ترتیب ورودی حفظ شود
 
 
