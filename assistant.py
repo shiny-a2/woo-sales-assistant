@@ -41,7 +41,18 @@ def _last_user_text(messages):
     return ""
 
 
-def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False):
+# سیگنال‌های اضافیِ عملکرد (کلیدواژه‌ای)
+_REPAIR_KW = ["تعمیر", "تعمير", "خرابی", "خراب شده", "خرابه", "کار نمیکنه", "کار نمی‌کند", "کار نمیکند",
+              "ایراد", "مشکل پیدا", "باتری تموم", "باتریش", "تعویض باتری", "عقربه", "بند پاره", "بندش پاره",
+              "شیشه شکست", "شیشه‌اش", "خوابیده", "کند شده", "عقب می‌کشه", "جلو می‌کشه"]
+_SELL_KW = ["بفروشم", "می‌فروشم", "میفروشم", "بفروش", "ساعتم رو بخر", "ساعتمو بخر", "ساعتم را بخر",
+            "می‌خرید ساعت", "میخرید ساعتم", "ساعتم رو می‌خرید", "ساعتمو می‌خرید", "دست دوم بفروش",
+            "کارکرده بفروش", "ساعتِ خودم رو بفروش", "فروشِ ساعتم"]
+_STORE_REFERRAL_KW = ["حضوری", "به شعبه", "شعبهٔ", "شعبه مرکزی", "مراجعه حضوری", "تشریف بیارید",
+                      "تشریف بیاورید", "تشریف بیارین", "از نزدیک", "حضوراً", "به فروشگاه مراجعه"]
+
+
+def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False, answer=""):
     """شمردنِ عملکرد + تحلیلِ رفتارِ مشتری: پاسخ/کانال + رویدادهای کلیدی (سفارش/رسید/ارجاع/مدیا) + سیگنال‌های فروش."""
     try:
         ch = str(channel or "")
@@ -56,6 +67,13 @@ def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False):
             metrics.bump("receipt", ch)
         if ctx.get("wrist_media") or ctx.get("wrist_media_request"):
             metrics.bump("wrist_media", ch)
+        _u, _a = (user_text or ""), (answer or "")
+        if any(k in _u for k in _REPAIR_KW):          # درخواستِ تعمیر
+            metrics.bump("repair", ch)
+        if any(k in _u for k in _SELL_KW):            # قصدِ فروشِ ساعتِ مشتری به ما
+            metrics.bump("sell_intent", ch)
+        if any(k in _a for k in _STORE_REFERRAL_KW):  # ارجاع به فروشگاهِ حضوری (در پاسخِ مغز)
+            metrics.bump("store_referral", ch)
         import salescfg
         _abk, _ = salescfg.ab_assign(f"{ch}:{cid}")
         if _abk:   # آزمونِ A/B لحن (اگر روشن باشد): پاسخ و سفارش را به‌تفکیکِ گروه بشمار
@@ -151,7 +169,7 @@ async def reply(channel, user_id, text, user_name=None, customer_phone=None):
     sessions.append(channel, user_id, "user", text)
     sessions.append(channel, user_id, "assistant", answer)
     sessions.add_shown(channel, user_id, [c.get("id") for c in ctx.get("cards", [])])
-    _record_metrics(channel, ctx, text, user_name, user_id)
+    _record_metrics(channel, ctx, text, user_name, user_id, answer=answer)
     return (answer, ctx)
 
 
@@ -203,7 +221,7 @@ async def reply_image(channel, user_id, image_data_url, caption="", user_name=No
     sessions.append(channel, user_id, "user", "[تصویر ساعت] " + (caption or ""))
     sessions.append(channel, user_id, "assistant", answer)
     sessions.add_shown(channel, user_id, [c.get("id") for c in ctx.get("cards", [])])
-    _record_metrics(channel, ctx, caption, user_name, user_id, image=True)
+    _record_metrics(channel, ctx, caption, user_name, user_id, image=True, answer=answer)
     return (answer, ctx)
 
 
@@ -312,7 +330,7 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
         text = (text + "\n\n🎥 عکس و ویدئوی روی مچ‌دستِ همین ساعت:\n" + links).strip()
     if _ck and ctx.get("cards"):  # ثبتِ کارت‌های نشان‌داده‌شده تا دفعهٔ بعد تکرار نشوند
         sessions.add_shown(_ck[0], _ck[1], [c.get("id") for c in ctx["cards"] if c.get("id")])
-    _record_metrics((customer or {}).get("channel"), ctx, _last_user_text(messages), (customer or {}).get("name"), (customer or {}).get("id"))
+    _record_metrics((customer or {}).get("channel"), ctx, _last_user_text(messages), (customer or {}).get("name"), (customer or {}).get("id"), answer=text)
     return (text, ctx)
 
 
@@ -429,7 +447,7 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         ctx["ask_gender"] = True
     if _ck and cards:  # ثبتِ کارت‌های تصویری در همان مخزنِ shown_ids (عدمِ‌تکرار با مسیرِ متن)
         sessions.add_shown(_ck[0], _ck[1], [c.get("id") for c in cards if c.get("id")])
-    _record_metrics((customer or {}).get("channel"), ctx, caption, (customer or {}).get("name"), (customer or {}).get("id"), image=True)
+    _record_metrics((customer or {}).get("channel"), ctx, caption, (customer or {}).get("name"), (customer or {}).get("id"), image=True, answer=text)
     return (text, ctx)
 
 
@@ -444,7 +462,7 @@ def _cards_as_text(cards):
             block.append("💰 " + c["price_label"])
         ship = c.get("shipping_time", "")   # «موجود در فروشگاه» نمایش داده نشود؛ روی «ارسال فوری» مانور بده
         if ship == "ارسال فوری":
-            block.append("⚡ ارسال فوریِ رایگان با پیک")
+            block.append("⚡ ارسال فوری")
         elif ship:
             block.append("🚚 " + ship)
         if c.get("url"):

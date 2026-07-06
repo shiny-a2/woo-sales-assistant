@@ -282,7 +282,20 @@ async def get_briefs(ids):
             by_id[i] = _product_brief(ent[1])
         else:
             missing.append(i)
-    if missing:   # فقط آن‌هایی که در کش نیستند را از سایت بگیر
+    if missing:   # از ایندکسِ محلیِ محصولات (بدونِ زدن به سایت)
+        try:
+            import productindex
+            still = []
+            for i in missing:
+                lp = productindex.get_product(i)
+                if lp:
+                    by_id[i] = _product_brief(lp)
+                else:
+                    still.append(i)
+            missing = still
+        except Exception:  # noqa: BLE001
+            pass
+    if missing:   # باقی‌مانده را از سایت بگیر
         items = await get("products", {"include": ",".join(str(i) for i in missing), "per_page": len(missing)})
         for p in (items or []):
             by_id[p.get("id")] = _product_brief(p)

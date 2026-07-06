@@ -202,7 +202,7 @@ def _card_caption(c):
         lines.append("💰 " + c["price_label"])
     ship = c.get("shipping_time", "")   # «موجود در فروشگاه» نمایش داده نشود؛ روی «ارسال فوری» مانور بده
     if ship == "ارسال فوری":
-        lines.append("⚡ ارسال فوریِ رایگان با پیک")
+        lines.append("⚡ ارسال فوری")
     elif ship:
         lines.append("🚚 " + ship)
     return "\n".join(lines)
