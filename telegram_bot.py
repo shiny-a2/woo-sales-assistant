@@ -200,11 +200,11 @@ def _card_caption(c):
         lines.append(f"🔖 {c['sale_price_label']}" + (f"  (قبلاً {reg})" if reg else "") + "  ✨")
     elif c.get("price_label"):
         lines.append("💰 " + c["price_label"])
-    av = c.get("availability", "")
-    ship = c.get("shipping_time", "")
-    if av or ship:
-        emoji = "⚡" if ship == "ارسال فوری" else "🚚"
-        lines.append(emoji + " " + " · ".join(x for x in (av, ship) if x))
+    ship = c.get("shipping_time", "")   # «موجود در فروشگاه» نمایش داده نشود؛ روی «ارسال فوری» مانور بده
+    if ship == "ارسال فوری":
+        lines.append("⚡ ارسال فوریِ رایگان با پیک")
+    elif ship:
+        lines.append("🚚 " + ship)
     return "\n".join(lines)
 
 

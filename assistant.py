@@ -442,11 +442,11 @@ def _cards_as_text(cards):
             block.append(f"🔖 {c['sale_price_label']}" + (f" (قبلاً {reg})" if reg else "") + " ✨")
         elif c.get("price_label"):
             block.append("💰 " + c["price_label"])
-        av = c.get("availability", "")
-        ship = c.get("shipping_time", "")
-        if av or ship:
-            emoji = "⚡" if ship == "ارسال فوری" else "🚚"
-            block.append(emoji + " " + " · ".join(x for x in (av, ship) if x))
+        ship = c.get("shipping_time", "")   # «موجود در فروشگاه» نمایش داده نشود؛ روی «ارسال فوری» مانور بده
+        if ship == "ارسال فوری":
+            block.append("⚡ ارسال فوریِ رایگان با پیک")
+        elif ship:
+            block.append("🚚 " + ship)
         if c.get("url"):
             block.append("🔗 " + c["url"])
         out.append("\n".join(block))

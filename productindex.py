@@ -114,24 +114,22 @@ async def sync(force=False):
     t0 = time.time()
     try:
         import woo
-        out = []
+        acc = []
         page = 1
         while page <= 60:   # سقفِ ایمنی (۶۰۰۰ محصول)
             rows = await woo.get("products", {"per_page": 100, "page": page, "status": "publish"})
             if not isinstance(rows, list) or not rows:
                 break
-            out.extend(_slim(p) for p in rows)
+            acc.extend(_slim(p) for p in rows)
+            _INDEX = acc      # ذخیرهٔ افزایشی: جستجو زودتر داده دارد و ری‌استارت پیشرفت را نمی‌بازد
+            _META.update({"synced_at": time.time(), "count": len(acc), "last_error": ""})
+            _save()
             if len(rows) < 100:
                 break
             page += 1
-        if out:
-            _INDEX = out
-            _META.update({"synced_at": time.time(), "count": len(out), "last_error": "",
-                          "duration": round(time.time() - t0, 1)})
-            _save()
-            return {"ok": True, "count": len(out), "duration": _META["duration"]}
-        _META["last_error"] = "no products returned"
-        return {"ok": False, "error": _META["last_error"]}
+        _META["duration"] = round(time.time() - t0, 1)
+        _save()
+        return {"ok": bool(acc), "count": len(acc), "duration": _META["duration"]}
     except Exception as e:  # noqa: BLE001
         _META["last_error"] = str(e)
         return {"ok": False, "error": str(e)}
