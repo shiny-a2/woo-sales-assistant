@@ -892,11 +892,17 @@ async def _product_sync_loop():
             st = productindex.status()
             stale = (st["count"] == 0) or (st["age_min"] is None) or (st["age_min"] > productindex.refresh_hours() * 60)
             if stale and not st["syncing"]:
-                print("[productindex] همگام‌سازیِ کاتالوگ…")
-                print("[productindex]", await productindex.sync())
+                full_age_d = (time.time() - float(productindex._META.get("full_at", 0) or 0)) / 86400
+                if st["count"] == 0 or full_age_d > 7:
+                    # پیمایشِ کامل: اولین‌بار یا هفتگی (پاک‌سازیِ حذف‌شده‌ها) — اولویت با موجودها
+                    print("[productindex] همگام‌سازیِ کاملِ کاتالوگ (اولویت: موجودها)…")
+                    print("[productindex]", await productindex.sync())
+                else:
+                    # به‌روزرسانیِ افزایشیِ سریع: فقط تغییرات (موجودی/قیمت/جدیدها) — ثانیه‌ای
+                    print("[productindex]", await productindex.sync_incremental())
         except Exception as e:  # noqa: BLE001
             print(f"[productindex] خطای حلقه: {e!r}")
-        await asyncio.sleep(900)   # هر ۱۵ دقیقه چک (sync خودش طبقِ سن تصمیم می‌گیرد)
+        await asyncio.sleep(900)   # هر ۱۵ دقیقه چک (طبقِ سن تصمیم می‌گیرد)
 
 
 async def _daily_analysis_loop():
@@ -937,6 +943,31 @@ async def _crm_name_sync_loop():
         except Exception as e:  # noqa: BLE001
             print(f"[crm-sync] خطای حلقه: {e!r}")
         await asyncio.sleep(60)
+
+
+async def _dna_refresh_loop():
+    """تازه‌سازیِ دوره‌ایِ بانکِ واحدِ DNA (هر ۱۲ ساعت):
+    - سفارش‌های اخیرِ ووکامرس → خریدارانِ جدید/به‌روزرسانیِ سابقه (بدونِ نیاز به چت)
+    - بانکِ یوزربات (که خودش هر ۶ ساعت CRMِ سایت را می‌کشد) → کانتکت‌های جدیدِ تلگرام/CRM
+    """
+    await asyncio.sleep(600)
+    import crm_index
+    while True:
+        try:
+            if not crm_index._CRAWL.get("running"):
+                r = await crm_index.crawl_from_woo(max_orders=200)   # فقط سفارش‌های اخیر (سبک)
+                print(f"[dna] تازه‌سازیِ سفارش‌ها: {r}")
+            if not crm_index._IMPORT.get("running"):
+                r2 = await asyncio.to_thread(crm_index.import_userbot)
+                print(f"[dna] تازه‌سازیِ بانکِ یوزربات: {r2.get('imported') if isinstance(r2, dict) else r2}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[dna] خطای تازه‌سازی: {e!r}")
+            try:
+                import health
+                health.log("dna", "error", f"refresh: {e}")
+            except Exception:  # noqa: BLE001
+                pass
+        await asyncio.sleep(12 * 3600)
 
 
 async def _health_loop():
@@ -987,6 +1018,7 @@ async def serve(tg_app=None):
     asyncio.create_task(_dna_backfill_startup())  # خزندهٔ DNA: اگر پروفایلی نیست، از سفارش‌های موجود بساز
     asyncio.create_task(_crm_name_sync_loop())    # نوشتنِ برگشتیِ نامِ نرمال‌شده به CRM (سینکِ دوطرفه)
     asyncio.create_task(_health_loop())           # هلث‌چکِ روزانهٔ کانال‌ها + بازبینیِ هوشمند (خودبهبودی)
+    asyncio.create_task(_dna_refresh_loop())      # تازه‌سازیِ ۱۲ساعتهٔ بانکِ DNA (سفارش‌های جدید + یوزربات/CRM)
     # log_config=None تا uvicorn لاگینگ را روی stdout بازپیکربندی نکند (با لاگ تهرانِ main تداخل دارد)
     cfg = uvicorn.Config(app, host=config.WEB_HOST, port=config.WEB_PORT, log_level="warning", log_config=None)
     server = uvicorn.Server(cfg)

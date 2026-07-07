@@ -107,43 +107,122 @@ def get_product(pid):
     return None
 
 
+async def _crawl(params, acc, seen_ids, max_pages=300):
+    """یک پیمایشِ صفحه‌به‌صفحه با پارامترهای داده‌شده؛ نتایج به acc اضافه و ذخیرهٔ افزایشی می‌شود."""
+    global _INDEX
+    import asyncio
+
+    import woo
+    page = 1
+    per = 50   # صفحهٔ سبک‌تر: هاستِ کند پاسخِ بزرگ را قطره‌ای می‌دهد و read-timeout را دور می‌زند
+    while page <= max_pages:
+        try:
+            # تایم‌اوتِ سختِ هر صفحه — تا یک پاسخِ قطره‌ای کلِ همگام‌سازی را ساعت‌ها قفل نکند
+            rows = await asyncio.wait_for(
+                woo.get("products", {"per_page": per, "page": page, "status": "publish", **params}), timeout=120)
+        except asyncio.TimeoutError:
+            _META["last_error"] = f"page {page} timeout"
+            print(f"[productindex] صفحهٔ {page} تایم‌اوت شد — ادامه در دورِ بعد")
+            return False
+        if not isinstance(rows, list) or not rows:
+            return True
+        for p in rows:
+            if p.get("id") in seen_ids:
+                continue
+            seen_ids.add(p.get("id"))
+            acc.append(_slim(p))
+        _INDEX = acc      # ذخیرهٔ افزایشی: جستجو زودتر داده دارد و ری‌استارت پیشرفت را نمی‌بازد
+        _META.update({"synced_at": time.time(), "count": len(acc), "last_error": ""})
+        _save()
+        if page % 10 == 0:
+            print(f"[productindex] {len(acc)} محصول تا صفحهٔ {page}")
+        if len(rows) < per:
+            return True
+        page += 1
+    return True
+
+
 async def sync(force=False):
-    """کلِ کاتالوگِ منتشرشده را صفحه‌به‌صفحه بگیر و محلی ذخیره کن (پس‌زمینه)."""
+    """کلِ کاتالوگ را محلی ذخیره کن — **اولویت با موجودها** (اول instock تا جستجو سریع‌تر مفید شود)."""
     global _INDEX
     if _META.get("syncing"):
         return {"ok": False, "error": "already syncing"}
     _META["syncing"] = True
     t0 = time.time()
     try:
+        acc = []
+        seen = set()
+        # پاسِ ۱: فقط موجودها (اولویتِ فروش) — سریع‌تر در دسترسِ جستجو قرار می‌گیرند
+        await _crawl({"stock_status": "instock"}, acc, seen)
+        print(f"[productindex] پاسِ موجودها تمام شد: {len(acc)}")
+        # پاسِ ۲: بقیهٔ کاتالوگ (ناموجودها) — برای شناساییِ کد/رفرنس و پیشنهادِ مشابه لازم‌اند
+        await _crawl({}, acc, seen)
+        _META["duration"] = round(time.time() - t0, 1)
+        _META["full_at"] = time.time()
+        _save()
+        return {"ok": bool(acc), "count": len(acc), "duration": _META["duration"]}
+    except Exception as e:  # noqa: BLE001
+        _META["last_error"] = str(e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        _META["syncing"] = False
+
+
+async def sync_incremental():
+    """به‌روزرسانیِ سریع: فقط محصولاتِ «تغییرکرده» از آخرین همگام‌سازی (موجودی/قیمت/ناموجودشدن و …).
+
+    به‌جای پیمایشِ کلِ کاتالوگ (ده‌ها دقیقه)، با modified_after فقط تغییرات را می‌گیرد (ثانیه‌ای).
+    """
+    global _INDEX
+    if _META.get("syncing"):
+        return {"ok": False, "error": "already syncing"}
+    since = float(_META.get("synced_at", 0) or 0)
+    if not _INDEX or not since:
+        return await sync()
+    _META["syncing"] = True
+    t0 = time.time()
+    try:
         import asyncio
 
         import woo
-        acc = []
+        iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since - 300))   # ۵ دقیقه هم‌پوشانیِ ایمن
+        changed = []
         page = 1
-        per = 50   # صفحهٔ سبک‌تر: هاستِ کند پاسخِ بزرگ را قطره‌ای می‌دهد و read-timeout را دور می‌زند
-        while page <= 300:   # سقفِ ایمنی (۱۵٬۰۰۰ محصول — کاتالوگ از ۶۰۰۰ بزرگ‌تر درآمد)
+        while page <= 20:   # تغییراتِ یک بازهٔ چندساعته به‌ندرت از ۱۰۰۰ می‌گذرد
             try:
-                # تایم‌اوتِ سختِ هر صفحه — تا یک پاسخِ قطره‌ای کلِ همگام‌سازی را ساعت‌ها قفل نکند
                 rows = await asyncio.wait_for(
-                    woo.get("products", {"per_page": per, "page": page, "status": "publish"}), timeout=120)
+                    woo.get("products", {"per_page": 50, "page": page, "status": "publish",
+                                         "modified_after": iso, "orderby": "modified", "order": "desc"}),
+                    timeout=120)
             except asyncio.TimeoutError:
-                _META["last_error"] = f"page {page} timeout"
-                print(f"[productindex] صفحهٔ {page} تایم‌اوت شد — ادامه در دورِ بعد")
+                _META["last_error"] = "incremental timeout"
                 break
             if not isinstance(rows, list) or not rows:
                 break
-            acc.extend(_slim(p) for p in rows)
-            _INDEX = acc      # ذخیرهٔ افزایشی: جستجو زودتر داده دارد و ری‌استارت پیشرفت را نمی‌بازد
-            _META.update({"synced_at": time.time(), "count": len(acc), "last_error": ""})
-            _save()
-            if page % 10 == 0:
-                print(f"[productindex] {len(acc)} محصول تا صفحهٔ {page}")
-            if len(rows) < per:
+            changed.extend(rows)
+            if len(rows) < 50:
                 break
             page += 1
+        if changed:
+            by_id = {p.get("id"): i for i, p in enumerate(_INDEX)}
+            added = updated = 0
+            for p in changed:
+                s = _slim(p)
+                i = by_id.get(s["id"])
+                if i is None:
+                    _INDEX.insert(0, s)   # محصولِ جدید → اولِ ایندکس (اولویتِ تازه‌ها)
+                    added += 1
+                else:
+                    _INDEX[i] = s          # قیمت/موجودی/مشخصاتِ تازه
+                    updated += 1
+            _META.update({"count": len(_INDEX), "last_error": ""})
+        _META["synced_at"] = time.time()
+        _META["inc_at"] = time.time()
         _META["duration"] = round(time.time() - t0, 1)
         _save()
-        return {"ok": bool(acc), "count": len(acc), "duration": _META["duration"]}
+        n = len(changed)
+        print(f"[productindex] به‌روزرسانیِ افزایشی: {n} تغییر در {_META['duration']}s")
+        return {"ok": True, "changed": n, "duration": _META["duration"]}
     except Exception as e:  # noqa: BLE001
         _META["last_error"] = str(e)
         return {"ok": False, "error": str(e)}
