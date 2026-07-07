@@ -44,7 +44,24 @@ async def _available_models():
 
 CHANNEL = "web"
 _tg_app = None  # برای ارجاع به ادمین از طریق تلگرام (هنگام serve ست می‌شود)
-_site_chats = deque(maxlen=80)  # آخرین گفتگوهای چتِ سایت برای پایش در داشبورد
+_site_chats = deque(maxlen=80)  # آخرین گفتگوهای چتِ سایت برای پایش در داشبورد (ماندگار روی دیسک)
+_SITE_CHATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "site_chats.json")
+try:
+    with open(_SITE_CHATS_FILE, encoding="utf-8") as _f:
+        _site_chats.extend(__import__("json").load(_f) or [])
+except Exception:  # noqa: BLE001
+    pass
+
+
+def _site_chats_save():
+    try:
+        import json as _json
+        tmp = _SITE_CHATS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(list(_site_chats), f, ensure_ascii=False)
+        os.replace(tmp, _SITE_CHATS_FILE)
+    except Exception:  # noqa: BLE001
+        pass
 _bcast = {"running": False, "sent": 0, "failed": 0, "total": 0, "stop": False}  # وضعیتِ ارسالِ گروهیِ تلگرام
 
 app = FastAPI(title="Javaherian Sales Assistant")
@@ -91,6 +108,7 @@ async def chat(body: ChatIn):
         import clock
         _site_chats.appendleft({"t": clock.tehran_now().strftime("%m-%d %H:%M"), "sid": sid,
                                 "name": (body.name or "").strip(), "q": (body.message or "")[:200], "a": (answer or "")[:400]})
+        _site_chats_save()
     except Exception:  # noqa: BLE001
         pass
     return JSONResponse({"reply": answer})
@@ -420,6 +438,7 @@ async def brain_chat(body: BrainChatIn, x_sb_token: str = Header(None, alias="X-
             _site_chats.appendleft({"t": clock.tehran_now().strftime("%m-%d %H:%M"), "sid": _cid or "web",
                                     "name": (cust.get("name") or "").strip(),
                                     "q": (_last_user_content(body.messages) or "")[:200], "a": (text or "")[:400]})
+            _site_chats_save()
         except Exception:  # noqa: BLE001
             pass
     return {
