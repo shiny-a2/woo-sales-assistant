@@ -193,6 +193,31 @@ def _add_name(p, name):
         p["name"] = name
 
 
+def _nn(name):
+    """نرمال‌سازیِ نامِ فارسی (ی/ک، حذفِ لقب/ایموجی)؛ اگر معنا نداشت، همان trimِ ساده."""
+    try:
+        import names as _names
+        return _names.normalize(name) or (name or "").strip()
+    except Exception:  # noqa: BLE001
+        return (name or "").strip()
+
+
+def _apply_name(p, entry, raw):
+    """موتورِ نام روی هر پیام: نرمالِ فارسی + جایگزینیِ نامِ غلط/عمومی با نامِ درست (طبقِ اولویت)."""
+    nm = _nn(raw)
+    if not nm:
+        return
+    if not entry.get("name"):
+        entry["name"] = nm
+    _add_name(p, nm)
+    try:
+        import names as _names
+        if _names.should_replace(p.get("name", ""), nm):
+            p["name"] = nm
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _person_for(entry, conn):
     """پروفایلِ متناظرِ یک هویت را بده/بساز و هویت را به آن وصل کن (بدونِ ذخیرهٔ نهایی)."""
     pid = entry.get("pid")
@@ -299,8 +324,7 @@ def link(channel, cid, phone=None, name=None, ig_id=None):
         e["ig_id"] = str(ig_id)
     p = _person_for(e, conn)
     if name:
-        e["name"] = name
-        _add_name(p, name)
+        _apply_name(p, e, name)
     if phone:
         e["phone"] = _digits(phone)
         p = _link_phone(e, phone, conn)
@@ -317,9 +341,8 @@ def touch(channel, cid, name=None):
     conn = _c()
     e = _get_ident(channel, cid, conn) or {"channel": channel, "cid": str(cid)}
     p = _person_for(e, conn)
-    if name and e.get("name") != name:
-        e["name"] = name
-        _add_name(p, name)
+    if name:
+        _apply_name(p, e, name)
     _put_ident(e, conn)
     _store_person(p, conn)
     conn.commit()
@@ -332,15 +355,13 @@ def observe(channel, cid, name=None, signals=None):
     try:
         conn = _c()
         e = _get_ident(channel, cid, conn) or {"channel": channel, "cid": str(cid)}
-        if name and not e.get("name"):
-            e["name"] = name
         p = _person_for(e, conn)
         now = _now()
         p["last_seen"] = now
         p["msgs"] = p.get("msgs", 0) + 1
         p["channels"][channel or "ch"] = p["channels"].get(channel or "ch", 0) + 1
         if name:
-            _add_name(p, name)
+            _apply_name(p, e, name)
         s = signals or {}
         for b in (s.get("brands") or []):
             p["brands"][b] = p["brands"].get(b, 0) + 1
