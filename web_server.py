@@ -230,6 +230,17 @@ async def brain_dna_crawl(x_sb_token: str = Header(None, alias="X-SB-Token")):
     return {"ok": True, "started": True}
 
 
+@app.get("/api/brain/dna/phone-batch")
+async def brain_dna_phone_batch(offset: int = 0, limit: int = 100,
+                                x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """دستهٔ بعدیِ «شماره + نام/نام‌خانوادگیِ نرمال‌شده» از بانکِ واحد — برای ذخیره در گوشی (به‌ترتیب)."""
+    _check_sb_token(x_sb_token)
+    import crm_index
+    items = crm_index.phone_batch(offset=offset, limit=limit)
+    return {"ok": True, "offset": offset, "count": len(items), "total_persons": crm_index.stats()["persons"],
+            "items": items}
+
+
 @app.post("/api/brain/handoff/reset-all")
 async def brain_handoff_reset(x_sb_token: str = Header(None, alias="X-SB-Token")):
     """همهٔ اتصال‌های زندهٔ فعال (هندآف) را ببند و گفتگوها را به دستیارِ هوشمند برگردان."""
