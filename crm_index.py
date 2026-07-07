@@ -1,38 +1,44 @@
-"""DNA مشتری: پروفایلِ واحدِ هر مشتری در همهٔ کانال‌ها + رفتار/علایق + سابقهٔ خرید (CRM).
+"""DNA مشتری — بانکِ واحدِ هویت/رفتار/خرید در همهٔ کانال‌ها، روی SQLite (سریع و ایندکس‌شده).
 
-هدف: مغز هر مخاطب را «بهتر از خودش» بشناسد. هر ورودی از هر کانالی (واتساپ/اینستاگرام/تلگرام/سایت)
-یک «هویت» می‌سازد؛ همهٔ هویت‌های یک نفر زیرِ یک «پروفایلِ واحد (person/DNA)» جمع می‌شوند. به‌محضِ
-معلوم‌شدنِ «شماره»، هویت‌های هم‌شماره (مثلاً کانتکتِ اینستاگرامیِ بی‌شماره) در همان پروفایل ادغام و در
-همهٔ کانال‌ها سینک می‌شوند. رفتار (برند/محصولِ موردِعلاقه، سیگنالِ خرید، اعتراض، تعمیر/فروش/ارجاعِ حضوری،
-لحنِ برنده) و سابقهٔ خریدِ سایت داخلِ همین پروفایل جمع می‌شود.
+هدف: مغز هر مخاطب را «بهتر از خودش» بشناسد و یک بانکِ واحد داشته باشیم که از هر کانالی (واتساپ/
+اینستاگرام/تلگرام/سایت/CRM) هر دیتایی هست، کانتکتِ مستقل بسازد و به‌محضِ کشفِ کلیدِ مشترک (شماره یا
+آیدیِ کانال) در یک پروفایل ادغام و در همه‌جا سینک شود.
 
-داده در data/crm_index.json (سازگارِ عقب‌رو با نسخهٔ فلتِ قدیمی). سابقهٔ سایت فقط هر REFRESH_H ساعت
-یک‌بار استعلام می‌شود (مدیریتِ بار/ریکوئست).
+ذخیره‌سازی: data/crm_index.db (SQLite، WAL) — برای مقیاسِ ده‌ها‌هزار کانتکت. اسکیمای پروفایل/هویت
+همان دیکشنریِ قبلی است (به‌صورتِ blob JSON در ردیف) + ستون‌های ایندکس‌شده (pid/phone9) برای جستجوی آنی.
+مهاجرت: اگر دیتابیس خالی بود و crm_index.json قدیمی موجود بود، یک‌بار وارد می‌شود.
 """
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_FILE = os.path.join(_HERE, "data", "crm_index.json")
+_DB = os.path.join(_HERE, "data", "crm_index.db")
+_JSON = os.path.join(_HERE, "data", "crm_index.json")   # نسخهٔ قدیمی (فقط برای مهاجرت)
 REFRESH_H = 12
 
-_M: dict = {}   # "channel:cid" -> identity: {channel, cid, phone, name, ig_id, pid, orders, checked_at}
-_P: dict = {}   # pid -> person profile (DNA)
-_CRAWL: dict = {"running": False, "last": 0, "phones": 0, "orders": 0, "error": ""}   # وضعیتِ خزندهٔ backfill
+_CONN = None
+_CRAWL: dict = {"running": False, "last": 0, "phones": 0, "orders": 0, "leads": 0, "error": ""}
 
 _PAID = ("completed", "processing", "on-hold", "deliver", "delivered")
 
 
+# ---------------- کمک‌تابع‌های پایه ----------------
 def _digits(s):
     return "".join(ch for ch in str(s or "") if ch.isdigit())
 
 
+def _ph9(s):
+    d = _digits(s)
+    return d[-9:] if len(d) >= 9 else ""
+
+
 def _same_phone(a, b):
-    a, b = _digits(a), _digits(b)
-    return bool(a) and bool(b) and len(a) >= 9 and len(b) >= 9 and a[-9:] == b[-9:]
+    a, b = _ph9(a), _ph9(b)
+    return bool(a) and a == b
 
 
 def _key(channel, cid):
@@ -57,51 +63,104 @@ def _merge_counts(dst, src):
             dst[k] = v
 
 
-# ---------------- ماندگاری ----------------
-def _load():
-    global _M, _P
+# ---------------- لایهٔ SQLite ----------------
+def _c():
+    global _CONN
+    if _CONN is None:
+        os.makedirs(os.path.dirname(_DB), exist_ok=True)
+        _CONN = sqlite3.connect(_DB, check_same_thread=False)
+        _CONN.execute("PRAGMA journal_mode=WAL")
+        _CONN.execute("PRAGMA synchronous=NORMAL")
+        _init_schema(_CONN)
+        _migrate_json_if_needed(_CONN)
+    return _CONN
+
+
+def _init_schema(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS persons(
+            pid TEXT PRIMARY KEY, name TEXT, last_seen REAL, orders_count INTEGER DEFAULT 0, blob TEXT);
+        CREATE TABLE IF NOT EXISTS identities(
+            idkey TEXT PRIMARY KEY, pid TEXT, phone9 TEXT, blob TEXT);
+        CREATE INDEX IF NOT EXISTS ix_ident_pid ON identities(pid);
+        CREATE INDEX IF NOT EXISTS ix_ident_ph ON identities(phone9);
+        CREATE INDEX IF NOT EXISTS ix_pers_seen ON persons(last_seen);
+        CREATE INDEX IF NOT EXISTS ix_pers_oc ON persons(orders_count);
+    """)
+    conn.commit()
+
+
+def _migrate_json_if_needed(conn):
+    n = conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
+    if n:
+        return
     try:
-        with open(_FILE, encoding="utf-8") as f:
+        with open(_JSON, encoding="utf-8") as f:
             data = json.load(f) or {}
     except Exception:  # noqa: BLE001
-        data = {}
-    if isinstance(data, dict) and "identities" in data:  # نسخهٔ جدید
-        _M = data.get("identities") or {}
-        _P = data.get("persons") or {}
-    else:  # نسخهٔ فلتِ قدیمی → مهاجرت
-        _M = data if isinstance(data, dict) else {}
-        _P = {}
-        _rebuild_persons()
-    if not _P:  # اطمینان: اگر پروفایلی نبود، از هویت‌ها بساز
-        _rebuild_persons()
+        return
+    persons = data.get("persons") or {}
+    idents = data.get("identities") or {}
+    if not persons and not idents:
+        return
+    for pid, p in persons.items():
+        p.setdefault("pid", pid)
+        _store_person(p, conn)
+    for idkey, e in idents.items():
+        _put_ident(e, conn)
+    conn.commit()
+    print(f"[dna] مهاجرت از JSON: {len(persons)} پروفایل، {len(idents)} هویت وارد شد")
 
 
-def _save():
-    try:
-        os.makedirs(os.path.dirname(_FILE), exist_ok=True)
-        tmp = _FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"identities": _M, "persons": _P}, f, ensure_ascii=False)
-        os.replace(tmp, _FILE)
-    except Exception:  # noqa: BLE001
-        pass
+def _load_person(pid, conn=None):
+    if not pid:
+        return None
+    row = (conn or _c()).execute("SELECT blob FROM persons WHERE pid=?", (pid,)).fetchone()
+    return json.loads(row[0]) if row else None
 
 
-def _rebuild_persons():
-    """پروفایل‌ها را از روی هویت‌های موجود بازسازی/ادغام کن (برای بوت و مهاجرت)."""
-    for e in list(_M.values()):
-        e.pop("pid", None)
-    for e in list(_M.values()):
-        p = _person_for(e)
-        if e.get("name"):
-            _add_name(p, e["name"])
-        if e.get("orders") is not None:
-            _apply_crm(p, e.get("orders") or [])
-        if e.get("phone"):
-            _link_phone(e, e["phone"])
+def _store_person(p, conn=None):
+    conn = conn or _c()
+    oc = int((p.get("crm") or {}).get("orders_count") or 0)
+    conn.execute(
+        "INSERT INTO persons(pid,name,last_seen,orders_count,blob) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(pid) DO UPDATE SET name=excluded.name,last_seen=excluded.last_seen,"
+        "orders_count=excluded.orders_count,blob=excluded.blob",
+        (p["pid"], p.get("name", ""), float(p.get("last_seen") or 0), oc, json.dumps(p, ensure_ascii=False)))
 
 
-# ---------------- پروفایلِ واحد (person) ----------------
+def _get_ident(channel, cid, conn=None):
+    row = (conn or _c()).execute("SELECT pid, blob FROM identities WHERE idkey=?", (_key(channel, cid),)).fetchone()
+    if not row:
+        return None
+    e = json.loads(row[1])
+    e["pid"] = row[0] or e.get("pid")   # ستونِ pid معتبرتر است (بعد از ادغام، blob ممکن است کهنه باشد)
+    return e
+
+
+def _put_ident(e, conn=None):
+    conn = conn or _c()
+    conn.execute(
+        "INSERT INTO identities(idkey,pid,phone9,blob) VALUES(?,?,?,?) "
+        "ON CONFLICT(idkey) DO UPDATE SET pid=excluded.pid,phone9=excluded.phone9,blob=excluded.blob",
+        (_key(e.get("channel"), e.get("cid")), e.get("pid", ""), _ph9(e.get("phone", "")),
+         json.dumps(e, ensure_ascii=False)))
+
+
+def _idents_by_phone(phone, conn=None):
+    p9 = _ph9(phone)
+    if not p9:
+        return []
+    rows = (conn or _c()).execute("SELECT pid, blob FROM identities WHERE phone9=?", (p9,)).fetchall()
+    out = []
+    for pid, blob in rows:
+        e = json.loads(blob)
+        e["pid"] = pid or e.get("pid")
+        out.append(e)
+    return out
+
+
+# ---------------- ساختِ پروفایل و ادغام ----------------
 def _new_person(pid):
     now = _now()
     return {"pid": pid, "created_at": now, "updated_at": now, "name": "", "names": [],
@@ -121,19 +180,6 @@ def _attach_identity(p, entry):
     p["identities"].append({"channel": ch, "cid": cid, "ig_id": str(entry.get("ig_id") or "")})
 
 
-def _person_for(entry):
-    pid = entry.get("pid")
-    if pid and pid in _P:
-        _attach_identity(_P[pid], entry)
-        return _P[pid]
-    pid = "p:" + _key(entry.get("channel"), entry.get("cid"))
-    p = _P.get(pid) or _new_person(pid)
-    _P[pid] = p
-    entry["pid"] = pid
-    _attach_identity(p, entry)
-    return p
-
-
 def _add_name(p, name):
     name = (name or "").strip()
     if not name:
@@ -144,19 +190,31 @@ def _add_name(p, name):
         p["name"] = name
 
 
-def _merge_persons(keep_pid, drop_pid):
+def _person_for(entry, conn):
+    """پروفایلِ متناظرِ یک هویت را بده/بساز و هویت را به آن وصل کن (بدونِ ذخیرهٔ نهایی)."""
+    pid = entry.get("pid")
+    p = _load_person(pid, conn) if pid else None
+    if not p:
+        pid = "p:" + _key(entry.get("channel"), entry.get("cid"))
+        p = _load_person(pid, conn) or _new_person(pid)
+    entry["pid"] = pid
+    _attach_identity(p, entry)
+    return p
+
+
+def _merge_persons(keep_pid, drop_pid, conn):
     if keep_pid == drop_pid:
         return keep_pid
-    a, b = _P.get(keep_pid), _P.get(drop_pid)
+    a, b = _load_person(keep_pid, conn), _load_person(drop_pid, conn)
     if not a or not b:
         return keep_pid
+    for idkey, blob in conn.execute("SELECT idkey, blob FROM identities WHERE pid=?", (drop_pid,)).fetchall():
+        ee = json.loads(blob)
+        ee["pid"] = keep_pid   # هم ستون هم blob را به‌روز کن تا هویت به پروفایلِ درست وصل بماند
+        conn.execute("UPDATE identities SET pid=?, blob=? WHERE idkey=?",
+                     (keep_pid, json.dumps(ee, ensure_ascii=False), idkey))
     for i in b.get("identities", []):
-        if not any(x.get("channel") == i.get("channel") and str(x.get("cid")) == str(i.get("cid"))
-                   for x in a["identities"]):
-            a["identities"].append(i)
-    for e in _M.values():          # هویت‌ها را به پروفایلِ نگه‌داشته وصل کن
-        if e.get("pid") == drop_pid:
-            e["pid"] = keep_pid
+        _attach_identity(a, i)
     a["phones"] = list(dict.fromkeys(a.get("phones", []) + b.get("phones", [])))
     for nm in b.get("names", []):
         _add_name(a, nm)
@@ -169,32 +227,30 @@ def _merge_persons(keep_pid, drop_pid):
         _merge_counts(a.setdefault(k, {}), b.get(k, {}))
     a["interests"] = list(dict.fromkeys(a.get("interests", []) + b.get("interests", [])))
     if b.get("crm") and (not a.get("crm") or (b["crm"].get("orders_count", 0) > a["crm"].get("orders_count", 0))):
-        a["crm"] = b["crm"]           # پروفایلی که سابقهٔ خریدِ بهتری دارد را نگه دار
+        a["crm"] = b["crm"]
     if b.get("notes") and not a.get("notes"):
         a["notes"] = b["notes"]
-    _P.pop(drop_pid, None)
+    conn.execute("DELETE FROM persons WHERE pid=?", (drop_pid,))
+    _store_person(a, conn)
     return keep_pid
 
 
-def _link_phone(entry, phone):
+def _link_phone(entry, phone, conn):
     """شماره را روی پروفایل ثبت و همهٔ پروفایل‌های هم‌شماره را در یکی ادغام کن (سینکِ بین‌کانالی)."""
     ph = _digits(phone)
-    p = _person_for(entry)
+    p = _person_for(entry, conn)
     if ph and ph not in p["phones"]:
         p["phones"].append(ph)
-    if len(ph) < 9:
+    p9 = _ph9(ph)
+    if not p9:
         return p
-    for e in list(_M.values()):
-        if e is entry:
-            continue
-        if _same_phone(e.get("phone", ""), ph) or _same_phone("".join(e.get("_p2", "")), ph):
-            op = _person_for(e)
-            if op.get("phones") and not any(_same_phone(x, ph) for x in op["phones"]):
-                continue
-            if op["pid"] != p["pid"]:
-                keep, drop = sorted([p["pid"], op["pid"]])
-                _merge_persons(keep, drop)
-                p = _P[keep]
+    other = {r[0] for r in conn.execute("SELECT DISTINCT pid FROM identities WHERE phone9=? AND pid<>?",
+                                        (p9, p["pid"]))}
+    for opid in other:
+        keep, drop = sorted([p["pid"], opid])
+        _merge_persons(keep, drop, conn)
+        p = _load_person(keep, conn)
+    entry["phone"] = ph
     return p
 
 
@@ -227,48 +283,53 @@ def _apply_crm(p, orders):
 
 # ---------------- API عمومی (سازگارِ عقب‌رو) ----------------
 def get(channel, cid):
-    return _M.get(_key(channel, cid)) or {}
+    return _get_ident(channel, cid) or {}
 
 
 def link(channel, cid, phone=None, name=None, ig_id=None):
-    """هویتِ یک مخاطب را ثبت/به‌روز کن (شماره، نام، آیدیِ اینستا) + پروفایلِ واحد."""
-    e = _M.setdefault(_key(channel, cid), {"channel": channel, "cid": str(cid or "")})
+    """هویتِ یک مخاطب را ثبت/به‌روز کن (شماره، نام، آیدیِ اینستا) + پروفایلِ واحد + ادغامِ هم‌شماره."""
+    conn = _c()
+    e = _get_ident(channel, cid, conn) or {"channel": channel, "cid": str(cid or "")}
     if ig_id:
         e["ig_id"] = str(ig_id)
-    p = _person_for(e)
+    p = _person_for(e, conn)
     if name:
         e["name"] = name
         _add_name(p, name)
     if phone:
         e["phone"] = _digits(phone)
-        _link_phone(e, phone)
-    _save()
+        p = _link_phone(e, phone, conn)
+    _put_ident(e, conn)
+    _store_person(p, conn)
+    conn.commit()
     return e
 
 
 def touch(channel, cid, name=None):
-    """هویتِ مخاطب را در ایندکس ثبت کن (بدونِ زدن به سایت) — «افزودن به کانتکت‌ها» + ساختِ پروفایل."""
+    """هویتِ مخاطب را ثبت کن (بدونِ زدن به سایت) — «افزودن به کانتکت‌ها» + ساختِ پروفایل."""
     if not cid:
         return
-    e = _M.setdefault(_key(channel, cid), {"channel": channel, "cid": str(cid)})
-    p = _person_for(e)
-    changed = False
+    conn = _c()
+    e = _get_ident(channel, cid, conn) or {"channel": channel, "cid": str(cid)}
+    p = _person_for(e, conn)
     if name and e.get("name") != name:
         e["name"] = name
         _add_name(p, name)
-        changed = True
-    _save() if changed else None
+    _put_ident(e, conn)
+    _store_person(p, conn)
+    conn.commit()
 
 
 def observe(channel, cid, name=None, signals=None):
-    """رفتارِ یک گفتگو را روی پروفایلِ DNA تجمیع کن (بعد از هر پاسخِ مغز صدا زده می‌شود)."""
+    """رفتارِ یک گفتگو را روی پروفایلِ DNA تجمیع کن (بعد از هر پاسخِ مغز)."""
     if not cid:
         return
     try:
-        e = _M.setdefault(_key(channel, cid), {"channel": channel, "cid": str(cid)})
+        conn = _c()
+        e = _get_ident(channel, cid, conn) or {"channel": channel, "cid": str(cid)}
         if name and not e.get("name"):
             e["name"] = name
-        p = _person_for(e)
+        p = _person_for(e, conn)
         now = _now()
         p["last_seen"] = now
         p["msgs"] = p.get("msgs", 0) + 1
@@ -279,7 +340,7 @@ def observe(channel, cid, name=None, signals=None):
         for b in (s.get("brands") or []):
             p["brands"][b] = p["brands"].get(b, 0) + 1
         for pr in (s.get("products") or []):
-            p["products"][pr] = p["products"].get(pr, 0) + 2   # واکنش به محصول وزنِ بیشتر
+            p["products"][pr] = p["products"].get(pr, 0) + 2
         if s.get("level"):
             p["intent"][s["level"]] = p["intent"].get(s["level"], 0) + 1
         if s.get("order"):
@@ -294,16 +355,15 @@ def observe(channel, cid, name=None, signals=None):
         if s.get("ab"):
             p["tone"][s["ab"]] = p["tone"].get(s["ab"], 0) + 1
         p["updated_at"] = now
-        _save()
+        _put_ident(e, conn)
+        _store_person(p, conn)
+        conn.commit()
     except Exception:  # noqa: BLE001
         pass
 
 
 def by_phone(phone):
-    p = _digits(phone)
-    if len(p) < 9:
-        return []
-    return [e for e in _M.values() if _same_phone(e.get("phone", ""), p)]
+    return _idents_by_phone(phone)
 
 
 # ---------------- سابقهٔ خرید + هینتِ مغز ----------------
@@ -326,14 +386,16 @@ async def history_hint(channel, cid, phone):
     """سابقهٔ خرید (کش‌شده) + سینکِ بین‌کانالی با شماره. خروجی برای تزریق به پرامپت."""
     if not phone:
         return ""
-    e = _M.setdefault(_key(channel, cid), {"channel": channel, "cid": str(cid or "")})
+    conn = _c()
+    e = _get_ident(channel, cid, conn) or {"channel": channel, "cid": str(cid or "")}
     e["phone"] = _digits(phone)
-    p = _link_phone(e, phone)   # ادغامِ هویت‌های هم‌شماره در یک پروفایل
+    p = _link_phone(e, phone, conn)
     now = _now()
     if "orders" not in e or (now - float(e.get("checked_at", 0))) > REFRESH_H * 3600:
-        fresh = None                       # اول از هویت‌های هم‌شمارهٔ تازه (بدونِ زدن به سایت)
-        for o in by_phone(phone):
-            if o is not e and "orders" in o and (now - float(o.get("checked_at", 0))) < REFRESH_H * 3600:
+        fresh = None
+        for o in _idents_by_phone(phone, conn):
+            if _key(o.get("channel"), o.get("cid")) != _key(channel, cid) \
+                    and "orders" in o and (now - float(o.get("checked_at", 0))) < REFRESH_H * 3600:
                 fresh = o
                 break
         if fresh:
@@ -346,23 +408,24 @@ async def history_hint(channel, cid, phone):
                 e["checked_at"] = now
             except Exception:  # noqa: BLE001
                 e.setdefault("orders", [])
-        for o in by_phone(phone):          # انتشارِ سابقه به همهٔ هویت‌های هم‌شماره
-            if o is not e:
+        for o in _idents_by_phone(phone, conn):
+            if _key(o.get("channel"), o.get("cid")) != _key(channel, cid):
                 o["orders"] = e.get("orders", [])
                 o["checked_at"] = e.get("checked_at", now)
+                _put_ident(o, conn)
         _apply_crm(p, e.get("orders") or [])
-        _save()
+        _store_person(p, conn)
+    _put_ident(e, conn)
+    conn.commit()
     return _fmt_history(e)
 
 
 def dna_hint(channel, cid):
-    """پروفایلِ رفتاریِ مشتری (برندها/علایق/سیگنال‌ها/کانال‌ها/سابقه) برای تزریق به مغز.
-
-    مستقل از شماره کار می‌کند (کاربرانِ فقط-اینستاگرامی هم DNA دارند)."""
-    e = _M.get(_key(channel, cid))
+    """پروفایلِ رفتاریِ مشتری برای تزریق به مغز (مستقل از شماره؛ کاربرانِ فقط-اینستاگرامی هم DNA دارند)."""
+    e = _get_ident(channel, cid)
     if not e:
         return ""
-    p = _P.get(e.get("pid") or "")
+    p = _load_person(e.get("pid"))
     if not p or p.get("msgs", 0) < 1:
         return ""
     bits = []
@@ -378,7 +441,7 @@ def dna_hint(channel, cid):
     elif intent.get("high", 0) + intent.get("med", 0) >= 2:
         bits.append("سیگنالِ خریدش بالاست")
     if intent.get("objection", 0) >= 2:
-        bits.append("به قیمت حساس بوده (قبلاً تردید/اعتراضِ قیمتی داشته) — ارزش و گارانتی را آرام یادآوری کن")
+        bits.append("به قیمت حساس بوده — ارزش و گارانتی را آرام یادآوری کن")
     sig = p.get("signals", {})
     if sig.get("repair"):
         bits.append("سابقهٔ پرسشِ تعمیر داشته")
@@ -391,7 +454,7 @@ def dna_hint(channel, cid):
         extra = f" (آخرین خرید: {crm.get('last_order')})" if crm.get("last_order") else ""
         bits.append(f"مشتریِ قدیمی با {crm['orders_count']} سفارش{extra}"
                     + (f"؛ برندِ خریدِ قبلی: {crm['fav_brand']}" if crm.get("fav_brand") else ""))
-    chans = [c for c in (p.get("channels") or {}).keys()]
+    chans = list((p.get("channels") or {}).keys())
     if len(chans) > 1:
         bits.append("از چند کانالِ مختلف با ما در ارتباط بوده (همان شخص)")
     if not bits:
@@ -418,48 +481,49 @@ def _public_person(p, brief=False):
 
 
 def profile(channel, cid):
-    e = _M.get(_key(channel, cid))
+    e = _get_ident(channel, cid)
     if not e:
         return {}
-    p = _P.get(e.get("pid") or "")
+    p = _load_person(e.get("pid"))
     return _public_person(p) if p else {}
 
 
 def get_profile(pid):
-    p = _P.get(pid)
+    p = _load_person(pid)
     return _public_person(p) if p else {}
 
 
 def top_profiles(limit=60):
-    ps = sorted(_P.values(), key=lambda p: p.get("last_seen", 0), reverse=True)[:limit]
-    return [_public_person(p, brief=True) for p in ps]
+    rows = _c().execute("SELECT blob FROM persons ORDER BY last_seen DESC LIMIT ?", (max(1, limit),)).fetchall()
+    return [_public_person(json.loads(r[0]), brief=True) for r in rows]
 
 
 def stats():
-    total = len(_P)
-    withphone = sum(1 for p in _P.values() if p.get("phones"))
-    buyers = sum(1 for p in _P.values() if (p.get("crm") or {}).get("orders_count"))
-    multichannel = sum(1 for p in _P.values() if len(p.get("channels") or {}) > 1)
-    return {"persons": total, "with_phone": withphone, "buyers": buyers, "multichannel": multichannel,
-            "identities": len(_M),
+    conn = _c()
+    persons = conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
+    buyers = conn.execute("SELECT COUNT(*) FROM persons WHERE orders_count>0").fetchone()[0]
+    withphone = conn.execute("SELECT COUNT(DISTINCT pid) FROM identities WHERE phone9<>''").fetchone()[0]
+    multichannel = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT pid FROM identities GROUP BY pid HAVING COUNT(DISTINCT "
+        "substr(idkey,1,instr(idkey,':')-1))>1)").fetchone()[0]
+    idents = conn.execute("SELECT COUNT(*) FROM identities").fetchone()[0]
+    return {"persons": persons, "with_phone": withphone, "buyers": buyers, "multichannel": multichannel,
+            "identities": idents,
             "crawl": {"running": _CRAWL["running"], "last": _CRAWL["last"], "phones": _CRAWL["phones"],
                       "orders": _CRAWL["orders"], "leads": _CRAWL.get("leads", 0), "error": _CRAWL["error"]}}
 
 
+# ---------------- خزندهٔ backfill (سفارش‌ها + لیدهای ثبت‌نامی) ----------------
 async def crawl_from_woo(max_orders=1500):
-    """خزندهٔ backfill: از سفارش‌های موجودِ ووکامرس، پروفایلِ واحدِ DNA برای مشتری‌های قبلی می‌سازد.
-
-    مشتری‌ها را بر اساسِ «شماره» گروه‌بندی می‌کند و برای هر شماره یک هویتِ seed (channel=site) +
-    پروفایل با سابقهٔ خرید می‌سازد. بعداً وقتی همان مشتری از هر کانالی پیام داد و شماره‌اش معلوم شد،
-    _link_phone او را در همین پروفایل ادغام و در همهٔ کانال‌ها سینک می‌کند.
-    """
+    """از سفارش‌ها و مشتریانِ ثبت‌نامیِ ووکامرس، پروفایلِ واحدِ DNA بساز/به‌روز کن (ادغام با شماره)."""
     if _CRAWL["running"]:
         return {"ok": False, "error": "already running"}
     _CRAWL["running"] = True
     _CRAWL["error"] = ""
     try:
         import woo
-        groups = {}   # last9 → {phone, name, orders[]}
+        conn = _c()
+        groups = {}
         page = 1
         processed = 0
         while processed < max_orders and page <= 60:
@@ -486,24 +550,26 @@ async def crawl_from_woo(max_orders=1500):
                     "items": [(li.get("name") or "").strip() for li in (o.get("line_items") or []) if li.get("name")][:4],
                 })
             processed += len(rows)
-            _CRAWL["orders"] = processed          # پیشرفتِ زنده برای داشبورد
+            _CRAWL["orders"] = processed
             _CRAWL["phones"] = len(groups)
             if len(rows) < 50:
                 break
             page += 1
-        for g in groups.values():          # ساختِ پروفایلِ خریدارها از سفارش‌ها
-            e = _M.setdefault(_key("site", g["phone"]), {"channel": "site", "cid": g["phone"]})
+        for g in groups.values():
+            e = _get_ident("site", g["phone"], conn) or {"channel": "site", "cid": g["phone"]}
             e["phone"] = g["phone"]
             if g["name"]:
                 e["name"] = g["name"]
             e["orders"] = g["orders"]
             e["checked_at"] = _now()
-            p = _person_for(e)
+            p = _link_phone(e, g["phone"], conn)
             if g["name"]:
                 _add_name(p, g["name"])
-            _link_phone(e, g["phone"])
             _apply_crm(p, g["orders"])
-        # پاسِ دوم: مشتریانِ ثبت‌نامیِ سایت (شاملِ «لیدها»یی که هنوز خرید نکرده‌اند) → پروفایلِ seed
+            _put_ident(e, conn)
+            _store_person(p, conn)
+        conn.commit()
+        # پاسِ دوم: مشتریانِ ثبت‌نامیِ سایت (لیدهای بدونِ خرید هم پروفایل بگیرند)
         leads = 0
         cpage = 1
         while cpage <= 40:
@@ -521,28 +587,27 @@ async def crawl_from_woo(max_orders=1500):
                     continue
                 nm = ((c.get("first_name") or b.get("first_name") or "") + " "
                       + (c.get("last_name") or b.get("last_name") or "")).strip()
-                e = _M.setdefault(_key("site", ph), {"channel": "site", "cid": ph})
+                e = _get_ident("site", ph, conn) or {"channel": "site", "cid": ph}
                 e["phone"] = ph
                 if nm and not e.get("name"):
                     e["name"] = nm
-                p = _person_for(e)
+                p = _link_phone(e, ph, conn)
                 if nm:
                     _add_name(p, nm)
-                if not (c.get("is_paying_customer")) and "lead" not in p.get("interests", []) and not (p.get("crm") or {}).get("orders_count"):
-                    p.setdefault("interests", []).append("lead")   # لیدِ غیرخریدار (ثبت‌نامی)
-                _link_phone(e, ph)
+                if not c.get("is_paying_customer") and "lead" not in p.get("interests", []) \
+                        and not (p.get("crm") or {}).get("orders_count"):
+                    p.setdefault("interests", []).append("lead")
+                _put_ident(e, conn)
+                _store_person(p, conn)
                 leads += 1
+            conn.commit()
             if len(crows) < 50:
                 break
             cpage += 1
         _CRAWL.update({"last": _now(), "phones": len(groups), "orders": processed, "leads": leads})
-        _save()
         return {"ok": True, "phones": len(groups), "orders": processed, "leads": leads}
     except Exception as e:  # noqa: BLE001
         _CRAWL["error"] = str(e)
         return {"ok": False, "error": str(e)}
     finally:
         _CRAWL["running"] = False
-
-
-_load()
