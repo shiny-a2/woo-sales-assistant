@@ -450,6 +450,40 @@ _handoff_active = {}    # (channel, customer_id) → anchor_group_msg_id (چت�
 _HANDOFF_END_WORDS = {"پایان", "بستن", "خاتمه", "پایان گفتگو", "end", "close"}
 _HANDOFF_END_RE = re.compile(r"^[./!]\s*(?:بات|پایان|ربات|بازگشت|ai|bot|end)\s*$", re.I)
 
+# نگاشت‌های هندآف/ارجاع باید روی دیسک بمانند؛ وگرنه با هر ری‌استارت، اتصالِ زندهٔ فعال می‌شکند
+# (ریپلایِ اپراتور رله نمی‌شود و «پایان» کار نمی‌کند).
+_HF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "handoffs.json")
+
+
+def _save_handoffs():
+    try:
+        import json as _j
+        data = {
+            "handoffs": {str(k): v for k, v in _handoffs.items()},
+            "active": [{"channel": k[0], "cid": k[1], "anchor": v} for k, v in _handoff_active.items()],
+            "escalations": {str(k): v for k, v in _escalations.items()},
+        }
+        os.makedirs(os.path.dirname(_HF_FILE), exist_ok=True)
+        tmp = _HF_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _j.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, _HF_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _load_handoffs():
+    try:
+        import json as _j
+        with open(_HF_FILE, encoding="utf-8") as f:
+            d = _j.load(f)
+        _handoffs.update({int(k): v for k, v in (d.get("handoffs") or {}).items()})
+        for it in (d.get("active") or []):
+            _handoff_active[(it.get("channel"), it.get("cid"))] = it.get("anchor")
+        _escalations.update({int(k): v for k, v in (d.get("escalations") or {}).items()})
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def is_handoff_active(channel, customer_id):
     return (channel, str(customer_id)) in _handoff_active
@@ -483,6 +517,7 @@ async def start_handoff(bot, channel, customer_id, name="", first_message="", re
     info = {"channel": channel, "customer_id": str(customer_id), "name": name}
     _handoffs[sent.message_id] = info
     _handoff_active[key] = sent.message_id
+    _save_handoffs()
     print(f"[tg] اتصالِ زنده شروع شد → {channel}:{customer_id}")
     return True
 
@@ -499,6 +534,7 @@ async def relay_user_to_group(bot, channel, customer_id, text, name=""):
         sent = await bot.send_message(gid, body, reply_to_message_id=anchor)
         # ریپلایِ اپراتور روی این پیام هم باید به همان هندآف نگاشت شود
         _handoffs[sent.message_id] = _handoffs.get(anchor)
+        _save_handoffs()
         return True
     except Exception as e:  # noqa: BLE001
         print(f"[tg] رله‌ی پیامِ کاربر به گروه ناموفق: {e}")
@@ -522,6 +558,7 @@ async def relay_user_photo_to_group(bot, channel, customer_id, image_bytes, text
             sent = await bot.send_message(gid, cap, reply_to_message_id=anchor)
         # ریپلایِ اپراتور روی این پیام هم به همان هندآف نگاشت شود
         _handoffs[sent.message_id] = _handoffs.get(anchor)
+        _save_handoffs()
         return True
     except Exception as e:  # noqa: BLE001
         print(f"[tg] رله‌ی عکسِ کاربر به گروه ناموفق: {e}")
@@ -536,6 +573,7 @@ async def end_handoff(bot, channel, customer_id):
     for mid in [m for m, v in list(_handoffs.items())
                 if v and (v.get("channel"), str(v.get("customer_id"))) == (channel, str(customer_id))]:
         _handoffs.pop(mid, None)
+    _save_handoffs()
     back = "گفتگو دوباره به دستیارِ هوشمندِ فروش سپرده شد 🤖🌟 در خدمتم؛ هر سؤالی دارید بفرمایید 🙏"
     if channel == "telegram":
         try:
@@ -606,6 +644,8 @@ def _clean_user_caption(text):
 # ---------- ارجاعِ عکسِ پیدا‌نشده به همکاران (همهٔ کانال‌ها) ----------
 _escalations = {}   # group_message_id → {channel, customer_id, name}
 
+_load_handoffs()   # بازیابیِ اتصال‌های زندهٔ فعال + ارجاع‌ها پس از ری‌استارت (وگرنه ریپلای/پایان می‌شکند)
+
 
 async def post_staff_escalation(bot, image_bytes, channel, customer_id, name="", question=""):
     """عکس/سوالِ مشتری که محصولش پیدا نشد → فقط به گروهِ «پیگیری/CRM» (نه گروهِ عکس‌وویدئو).
@@ -623,6 +663,7 @@ async def post_staff_escalation(bot, image_bytes, channel, customer_id, name="",
     try:
         sent = await bot.send_photo(gid, photo=bytes(image_bytes), caption=cap)
         _escalations[sent.message_id] = {"channel": channel, "customer_id": str(customer_id), "name": name, "question": question}
+        _save_handoffs()
         return True
     except Exception as e:  # noqa: BLE001
         print(f"[tg] ارسالِ ارجاعِ عکس به همکاران ناموفق: {e}")
@@ -868,6 +909,7 @@ async def _on_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await _notify_channel(esc["channel"], esc["customer_id"], txt)
                 _escalations.pop(m.reply_to_message.message_id, None)
+                _save_handoffs()
             return
     # رسیدگی به مدیای همکار فقط در گروهِ کاری (staff)
     if not config.STAFF_GROUP_ID or m.chat_id != config.STAFF_GROUP_ID or not m.reply_to_message:

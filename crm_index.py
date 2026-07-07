@@ -263,6 +263,29 @@ def mark_crm_pushed(phone):
     c.commit()
 
 
+def phone_count():
+    return _c().execute("SELECT COUNT(*) FROM persons WHERE pid IN (SELECT DISTINCT pid FROM identities WHERE phone9<>'')").fetchone()[0]
+
+
+def phone_batch(offset=0, limit=100):
+    """دستهٔ بعدیِ «شماره + نام/نام‌خانوادگیِ نرمال‌شده» از بانکِ واحد، برای ذخیره در گوشی (به‌ترتیب)."""
+    import names as _names
+    rows = _c().execute("SELECT blob FROM persons ORDER BY rowid LIMIT ? OFFSET ?",
+                        (max(1, min(limit, 500)), max(0, offset))).fetchall()
+    out = []
+    for (blob,) in rows:
+        p = json.loads(blob)
+        phones = p.get("phones") or []
+        if not phones:
+            continue
+        ph = _digits(phones[0])
+        if len(ph) < 10:
+            continue
+        first, last = _names.split(p.get("name", "")) if p.get("name") else ("", "")
+        out.append({"phone": ph, "first": first, "last": last})
+    return out
+
+
 def _person_for(entry, conn):
     """پروفایلِ متناظرِ یک هویت را بده/بساز و هویت را به آن وصل کن (بدونِ ذخیرهٔ نهایی)."""
     pid = entry.get("pid")
