@@ -265,15 +265,30 @@ async def _reply_context_sheet(rc):
 
     rc: {"url"/"name"/"reference"} از کارتِ ریپلای‌شده. محصول را دقیق resolve می‌کند (slug/کدِ رفرنس)
     تا با محصولِ دیگری اشتباه نشود (ریشهٔ باگِ تروساردی→سیتیزن)."""
+    def _fallback():
+        # ⚠️ حتی اگر resolve شکست خورد (هاستِ کند/خطا)، نام/لینکِ کارت را دور نریز — وگرنه مغز
+        #    می‌پرسد «کدوم محصول؟» که مشتری را کلافه می‌کند. همان نام را قطعی تزریق کن.
+        nm = (rc.get("name") or "").strip()
+        url = (rc.get("url") or "").strip()
+        if not (nm or url):
+            return ""
+        return ("⚡ مشتری به کارتِ یک محصولِ مشخص ریپلای کرده و دربارهٔ **همان** می‌پرسد: "
+                + (f"«{nm}»" if nm else "")
+                + (f" — {url}" if url else "")
+                + ". ⛔ هرگز نپرس «کدام محصول/لینک/عکس/رفرنس» — محصول همین است و مشخص است. "
+                  "اگر قیمت/جزئیات لازم داری، همین حالا با find_by_reference (کدِ داخلِ نام) یا "
+                  "search_products (نامِ دقیق) خودت پیدا کن و پاسخ بده. "
+                  "اگر با جستجو هم دقیق پیدا نشد، باز هم از مشتری لینک/رفرنس نخواه؛ بگو "
+                  "«همین مدل رو الان از همکارانم استعلام می‌کنم و سریع خبرتون می‌دم 🙏» و کوتاه ادامه بده.")
     try:
         brief = await woo.resolve_product(
             url=(rc.get("url") or ""), name=(rc.get("name") or ""), reference=(rc.get("reference") or ""))
     except Exception as e:  # noqa: BLE001
         print(f"[assistant] resolveِ محصولِ ریپلای ناموفق: {type(e).__name__}: {e}")
-        return ""
+        return _fallback()
     if not brief or not brief.get("id"):
         print(f"[assistant] resolve بدون نتیجه: url={rc.get('url')!r} name={rc.get('name')!r}")
-        return ""
+        return _fallback()
     try:
         full = await woo.get_product(brief["id"])
     except Exception as e:  # noqa: BLE001
