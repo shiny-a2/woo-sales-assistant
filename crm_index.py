@@ -486,6 +486,8 @@ async def crawl_from_woo(max_orders=1500):
                     "items": [(li.get("name") or "").strip() for li in (o.get("line_items") or []) if li.get("name")][:4],
                 })
             processed += len(rows)
+            _CRAWL["orders"] = processed          # پیشرفتِ زنده برای داشبورد
+            _CRAWL["phones"] = len(groups)
             if len(rows) < 50:
                 break
             page += 1
