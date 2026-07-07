@@ -36,6 +36,7 @@ def _slim(p):
         "on_sale": bool(p.get("on_sale")),
         "purchasable": bool(p.get("purchasable", True)),
         "stock_status": p.get("stock_status") or "",
+        "manage_stock": bool(p.get("manage_stock")),   # لازم برای availability(): فروشگاه (ارسال فوری) vs شرکت (۳-۷ روز)
         "stock_quantity": p.get("stock_quantity"),
         "featured": bool(p.get("featured")),
         "average_rating": p.get("average_rating") or "",

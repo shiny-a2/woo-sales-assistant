@@ -566,11 +566,23 @@ def _local_candidates(gender=None, brand=None, dial_color=None, movement=None, s
     return out
 
 
+def _feature_ok(p, feature):
+    """آیا محصول ویژگیِ خواسته‌شده (شب‌نما/کرنوگراف/دوزمانه/تقویم…) را دارد؟ در همهٔ ویژگی‌ها + نام می‌گردد."""
+    f = (feature or "").strip().replace("‌", " ")
+    if not f:
+        return True
+    variants = {f, f.replace(" ", ""), f.replace("کرنو", "کرونو"), f.replace("کرونو", "کرنو")}
+    blob = (p.get("name") or "") + " " + " ".join(
+        str(o) for a in (p.get("attributes") or []) for o in (a.get("options") or []))
+    blob = blob.replace("‌", " ")
+    return any(v and v in blob for v in variants)
+
+
 async def search_watches(gender=None, movement=None, dial_color=None, strap_color=None,
                          case_color=None, strap_material=None, brand=None, style=None,
                          min_toman=None, max_toman=None, target_toman=None, query=None,
                          on_sale=False, in_stock_only=True, limit=7, exclude_ids=None,
-                         newest=False):
+                         newest=False, feature=None):
     """جستجوی ساعت با تشخیص درست جنسیت (دسته+عنوان) و مشخصات فنی (ویژگی).
 
     یک فیلترِ گزینشی (رنگ/موتور/برند) را مبنای کوئری می‌گذارد، بعد در پایتون
@@ -700,6 +712,9 @@ async def search_watches(gender=None, movement=None, dial_color=None, strap_colo
 
         rows = [r for r in rows if _strap_ok(r[1])]
 
+    # ویژگیِ کارکردی (شب‌نما/کرنوگراف/دوزمانه/تقویم…): از ویژگی‌های خودِ محصول خوانده می‌شود
+    if feature:
+        rows = [r for r in rows if _feature_ok(r[1], feature)]
     # برند: اگر مشتری برند خواست، فقط همان برند (حتی وقتی رنگ/معیارِ دیگری primary بوده)
     if brand:
         _b = brand.strip()
@@ -719,7 +734,24 @@ async def search_watches(gender=None, movement=None, dial_color=None, strap_colo
     else:
         rows.sort(key=lambda r: (0 if r[0].get("shipping_time") == "ارسال فوری" else 1, 0 if _jewel(r[1]) else 1))
 
-    return [b for (b, _) in rows][: max(3, int(limit or 7))]
+    # قانونِ ترکیب: ~۵۰٪ از انتخاب‌های ارسالی محصولاتِ گارانتیِ «جواهرتایم» باشند (تا جایی که موجود است)
+    n = max(3, int(limit or 7))
+    jew = [r for r in rows if _jewel(r[1])]
+    non = [r for r in rows if not _jewel(r[1])]
+    if jew and non:
+        picked, ji, ni = [], 0, 0
+        for k in range(n):
+            take_jew = (k % 2 == 0)   # یک‌درمیان: نیمی جواهرتایم
+            if take_jew and ji < len(jew):
+                picked.append(jew[ji]); ji += 1
+            elif ni < len(non):
+                picked.append(non[ni]); ni += 1
+            elif ji < len(jew):
+                picked.append(jew[ji]); ji += 1
+            else:
+                break
+        return [b for (b, _) in picked]
+    return [b for (b, _) in rows][:n]
 
 
 # ---------- سفارش ----------
