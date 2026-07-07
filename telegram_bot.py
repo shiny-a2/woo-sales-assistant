@@ -490,7 +490,9 @@ def is_handoff_active(channel, customer_id):
 
 
 def _norm_end(s):
-    return (s or "").strip().strip(".!،/\\ ").lower()
+    # ی/ک عربی→فارسی، حذفِ نیم‌فاصله، و پاک‌کردنِ گیومه/نقطه/فاصله‌های دور تا «پایان»/«پایان.»/«پایان» همه بگیرند
+    s = (s or "").strip().translate(str.maketrans("يك", "یک")).replace("‌", "")
+    return s.strip(".!؟،؛:,«»\"'`/\\ \t\n").lower()
 
 
 async def start_handoff(bot, channel, customer_id, name="", first_message="", reason=""):
