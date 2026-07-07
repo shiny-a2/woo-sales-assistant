@@ -272,8 +272,14 @@ async def _post_staff_request(bot, req, channel=""):
             return await bot.send_photo(config.STAFF_GROUP_ID, photo=req["image"], caption=cap)
         return await bot.send_message(config.STAFF_GROUP_ID, cap)
     except Exception as e:  # noqa: BLE001
-        print(f"[tg] ارسال درخواست به گروه ناموفق: {e}")
-        return None
+        # هاستِ کندِ سایت گاهی عکس را به تلگرام نمی‌دهد → اعلان هرگز نباید گم شود؛ متنی بفرست
+        print(f"[tg] ارسال درخواست به گروه (با عکس) ناموفق: {e} — ارسالِ متنی")
+        try:
+            cap2 = cap + (f"\n🖼 عکسِ محصول: {req['image']}" if req.get("image") else "")
+            return await bot.send_message(config.STAFF_GROUP_ID, cap2, disable_web_page_preview=False)
+        except Exception as e2:  # noqa: BLE001
+            print(f"[tg] ارسال درخواستِ متنی هم ناموفق: {e2}")
+            return None
 
 
 async def post_wrist_request(bot, req, channel, customer_id):
