@@ -443,7 +443,7 @@ def stats():
     return {"persons": total, "with_phone": withphone, "buyers": buyers, "multichannel": multichannel,
             "identities": len(_M),
             "crawl": {"running": _CRAWL["running"], "last": _CRAWL["last"], "phones": _CRAWL["phones"],
-                      "orders": _CRAWL["orders"], "error": _CRAWL["error"]}}
+                      "orders": _CRAWL["orders"], "leads": _CRAWL.get("leads", 0), "error": _CRAWL["error"]}}
 
 
 async def crawl_from_woo(max_orders=1500):
