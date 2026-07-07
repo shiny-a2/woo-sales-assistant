@@ -65,6 +65,20 @@ def _site_chats_save():
 _bcast = {"running": False, "sent": 0, "failed": 0, "total": 0, "stop": False}  # وضعیتِ ارسالِ گروهیِ تلگرام
 
 app = FastAPI(title="Javaherian Sales Assistant")
+
+
+@app.middleware("http")
+async def _health_error_middleware(request, call_next):
+    """ارور هندلینگِ سراسری: هر خطای پیش‌بینی‌نشدهٔ هر مسیر → لاگِ واحدِ سلامت (پروژه بزرگ شده، هیچ خطایی گم نشود)."""
+    try:
+        return await call_next(request)
+    except Exception as e:  # noqa: BLE001
+        try:
+            import health
+            health.log("brain", "error", f"{request.url.path}: {type(e).__name__}: {e}")
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.WEB_ALLOWED_ORIGINS,
@@ -228,6 +242,38 @@ async def brain_dna_crawl(x_sb_token: str = Header(None, alias="X-SB-Token")):
         return {"ok": False, "error": "already running", "crawl": crm_index.stats().get("crawl")}
     asyncio.create_task(crm_index.crawl_from_woo())
     return {"ok": True, "started": True}
+
+
+@app.get("/api/brain/health/status")
+async def brain_health_status(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """وضعیتِ آخرین هلث‌چکِ کانال‌ها + آموخته‌های روزانه + خطاهای اخیر — برای تیکِ سلامتِ داشبورد."""
+    _check_sb_token(x_sb_token)
+    import health
+    return {"ok": True, "status": health.status(), "lessons": health.lessons(),
+            "recent_errors": health.recent(15, level="error")}
+
+
+@app.post("/api/brain/health/run")
+async def brain_health_run(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """اجرای دستیِ هلث‌چکِ همهٔ کانال‌ها (تستِ رفتاری)."""
+    _check_sb_token(x_sb_token)
+    import health
+    return {"ok": True, "result": await health.run_channel_checks()}
+
+
+class HealthReportIn(BaseModel):
+    service: str = ""
+    level: str = "error"
+    message: str = ""
+
+
+@app.post("/api/brain/health/report")
+async def brain_health_report(body: HealthReportIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """سرویس‌های دیگر (wa/ig/userbot) خطاهایشان را این‌جا گزارش می‌کنند → لاگِ واحدِ سلامت."""
+    _check_sb_token(x_sb_token)
+    import health
+    health.log(body.service or "ext", body.level or "error", body.message)
+    return {"ok": True}
 
 
 @app.get("/api/brain/dna/phone-batch")
@@ -893,6 +939,31 @@ async def _crm_name_sync_loop():
         await asyncio.sleep(60)
 
 
+async def _health_loop():
+    """هلث‌چکِ رفتاریِ کانال‌ها: یک‌بار بعد از بوت، بعد روزی یک‌بار (~۰۸:۳۰ تهران) + بازبینیِ هوشمندِ روزانه."""
+    await asyncio.sleep(180)   # بگذار همهٔ سرویس‌ها بعد از بوت جا بیفتند
+    import health
+    last_day = ""
+    try:
+        await health.run_channel_checks()   # چکِ اولیهٔ بعد از بوت
+    except Exception as e:  # noqa: BLE001
+        print(f"[health] چکِ اولیه ناموفق: {e!r}")
+    while True:
+        try:
+            import clock
+            now = clock.tehran_now()
+            day = now.strftime("%Y-%m-%d")
+            if day != last_day and now.hour >= 8:
+                last_day = day
+                await health.run_channel_checks()
+                await health.daily_review()   # بازبینیِ gpt-5.5 → آموخته‌های روزانه (خودبهبودی)
+                st = health.status()
+                print(f"[health] هلث‌چکِ روزانه: {st.get('ok_count')}/{st.get('total')} سالم")
+        except Exception as e:  # noqa: BLE001
+            print(f"[health] خطای حلقه: {e!r}")
+        await asyncio.sleep(1800)
+
+
 async def _dna_backfill_startup():
     """اگر هنوز پروفایلِ DNA ساخته نشده، خزندهٔ backfill را یک‌بار اجرا کن (از سفارش‌های موجود)."""
     await asyncio.sleep(45)   # بگذار ایندکس/سرویس بالا بیاید
@@ -915,6 +986,7 @@ async def serve(tg_app=None):
     asyncio.create_task(_product_sync_loop())    # ایندکسِ محلیِ محصولات (جستجوی آنی)
     asyncio.create_task(_dna_backfill_startup())  # خزندهٔ DNA: اگر پروفایلی نیست، از سفارش‌های موجود بساز
     asyncio.create_task(_crm_name_sync_loop())    # نوشتنِ برگشتیِ نامِ نرمال‌شده به CRM (سینکِ دوطرفه)
+    asyncio.create_task(_health_loop())           # هلث‌چکِ روزانهٔ کانال‌ها + بازبینیِ هوشمند (خودبهبودی)
     # log_config=None تا uvicorn لاگینگ را روی stdout بازپیکربندی نکند (با لاگ تهرانِ main تداخل دارد)
     cfg = uvicorn.Config(app, host=config.WEB_HOST, port=config.WEB_PORT, log_level="warning", log_config=None)
     server = uvicorn.Server(cfg)

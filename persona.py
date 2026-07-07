@@ -251,6 +251,13 @@ def system_prompt():
     extra = load_persona_extra()
     if extra:
         parts.append("دستورهای اضافیِ مدیر (اولویت با این‌هاست):\n" + extra)
+    try:  # آموخته‌های روزانهٔ سیستمِ خودبهبودی (حداکثر ۳ نکتهٔ رفتاریِ کوتاه)
+        import health
+        _lp = health.lessons_prompt()
+        if _lp:
+            parts.append(_lp)
+    except Exception:  # noqa: BLE001
+        pass
     parts.append(
         "نامِ برند: اگر مشتری برند را با مخفف، انگلیسی، لهجه یا نامِ مستعار گفت، خودت آن را به نامِ کاملِ فارسیِ برند تبدیل کن و همان را در brandِ جستجو بده — "
         "مثلاً «سی‌کی / ck / calvin klein» → «کلوین کلاین»، «جی‌شاک / g-shock / ادیفایس» → «کاسیو»، «mk / michael kors» → «مایکل کورس»، "
