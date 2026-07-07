@@ -140,7 +140,7 @@ class BrainChatIn(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     cards_as_text: bool = True  # کانال‌هایی که خودشان کارت رندر می‌کنند → False (متنِ تمیز + cards ساختاریافته)
-    reply_context: dict | None = None  # کارتی که مشتری به آن ریپلای کرده {"url"/"name"/"reference"}
+    reply_context: dict | list | None = None  # کارت(های) ریپلای‌شده {"url"/"name"/"reference"} — یکی یا لیستی از چند محصول
     customer: dict | None = None  # {channel, id, name} — برای ردگیریِ کارت‌های نشان‌داده‌شده (عدمِ‌تکرار/صفحه‌بندی)
 
 
@@ -508,6 +508,14 @@ async def brain_chat(body: BrainChatIn, x_sb_token: str = Header(None, alias="X-
             _site_chats_save()
         except Exception:  # noqa: BLE001
             pass
+    # درخواستِ مدیای مچ از کانال‌های غیرتلگرام → اعلان در گروهِ عکس‌وویدئو (وگرنه همکاران هیچ‌وقت باخبر نمی‌شوند)
+    _wmr = ctx.get("wrist_media_request")
+    if _wmr and _ch and _ch != "telegram" and _cid and _tg_app:
+        try:
+            import telegram_bot as _tb2
+            await _tb2.post_wrist_request(_tg_app.bot, _wmr, _ch, _cid)
+        except Exception as e:  # noqa: BLE001
+            print(f"[brain] اعلانِ درخواستِ مچ به گروه ناموفق: {type(e).__name__}: {e}")
     return {
         "text": text,
         # دادهٔ ساختاریافته برای کانال‌هایی که خودшان رندر می‌کنند (کارت/مدیا/سفارش/ارجاع):

@@ -255,10 +255,11 @@ _media_requests = {}  # message_id درخواست در گروه → {customer, r
 _logged_groups = set()  # گروه‌هایی که آیدی‌شان یک‌بار لاگ شده
 
 
-async def _post_staff_request(context, req):
-    """درخواستِ عکس/ویدئوی مچ‌دست را در گروهِ کاری می‌گذارد."""
+async def _post_staff_request(bot, req, channel=""):
+    """درخواستِ عکس/ویدئوی مچ‌دست را در گروهِ کاری می‌گذارد (همهٔ کانال‌ها)."""
     cap = (
-        "🔔 درخواستِ عکس/ویدئوی روی مچ‌دست\n"
+        "🔔 درخواستِ عکس/ویدئوی روی مچ‌دست"
+        + (f" — کانال: {_CHANNEL_FA.get(channel, channel)}" if channel else "") + "\n"
         "همکارانِ عزیز، یک مشتری برای این ساعت عکس و ویدئوی روی مچ‌دست خواسته 🙏\n"
         "لطفاً عکس/ویدئوها رو بگیرید و حتماً «همین پیام» رو ریپلای کنید و بفرستید، تا هم مستقیم "
         "به دستِ مشتری برسه و هم در کانال بایگانی بشه.\n\n"
@@ -268,11 +269,21 @@ async def _post_staff_request(context, req):
     )
     try:
         if req.get("image"):
-            return await context.bot.send_photo(config.STAFF_GROUP_ID, photo=req["image"], caption=cap)
-        return await context.bot.send_message(config.STAFF_GROUP_ID, cap)
+            return await bot.send_photo(config.STAFF_GROUP_ID, photo=req["image"], caption=cap)
+        return await bot.send_message(config.STAFF_GROUP_ID, cap)
     except Exception as e:  # noqa: BLE001
         print(f"[tg] ارسال درخواست به گروه ناموفق: {e}")
         return None
+
+
+async def post_wrist_request(bot, req, channel, customer_id):
+    """درخواستِ مچ از کانال‌های غیرتلگرام (واتساپ/اینستا/سایت) → اعلان در گروهِ عکس‌وویدئو + ثبت برای تحویل."""
+    sent = await _post_staff_request(bot, req, channel=channel)
+    if sent:
+        _media_requests[sent.message_id] = {"channel": channel, "customer_id": str(customer_id),
+                                            "reference": req.get("reference", ""), "name": req.get("name", "")}
+        _save_handoffs()
+    return bool(sent)
 
 
 async def _post_support_request(context, user, last_text, handoff):
@@ -462,6 +473,7 @@ def _save_handoffs():
             "handoffs": {str(k): v for k, v in _handoffs.items()},
             "active": [{"channel": k[0], "cid": k[1], "anchor": v} for k, v in _handoff_active.items()],
             "escalations": {str(k): v for k, v in _escalations.items()},
+            "media_requests": {str(k): v for k, v in _media_requests.items()},
         }
         os.makedirs(os.path.dirname(_HF_FILE), exist_ok=True)
         tmp = _HF_FILE + ".tmp"
@@ -481,6 +493,7 @@ def _load_handoffs():
         for it in (d.get("active") or []):
             _handoff_active[(it.get("channel"), it.get("cid"))] = it.get("anchor")
         _escalations.update({int(k): v for k, v in (d.get("escalations") or {}).items()})
+        _media_requests.update({int(k): v for k, v in (d.get("media_requests") or {}).items()})
     except Exception:  # noqa: BLE001
         pass
 
@@ -944,18 +957,29 @@ async def _on_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     req = _media_requests.get(m.reply_to_message.message_id)
     if not req:
         return
-    # ۱) تحویل به مشتری
-    try:
-        await context.bot.copy_message(chat_id=req["customer"], from_chat_id=config.STAFF_GROUP_ID, message_id=m.message_id)
-    except Exception as e:  # noqa: BLE001
-        print(f"[tg] تحویل مدیا به مشتری ناموفق: {e}")
-    # ۲) درج در چنل (ساختار قدیمی: مدیا + ریپلایِ رفرانس)
+    # ۱) اول درج در چنل (مدیا + ریپلایِ رفرانس) — لینکش برای تحویل به کانال‌های غیرتلگرام لازم است
+    posted = None
     try:
         posted = await context.bot.copy_message(chat_id="@" + config.MEDIA_CHANNEL, from_chat_id=config.STAFF_GROUP_ID, message_id=m.message_id)
         if req.get("reference"):
             await context.bot.send_message("@" + config.MEDIA_CHANNEL, req["reference"], reply_to_message_id=posted.message_id)
     except Exception as e:  # noqa: BLE001
         print(f"[tg] درج در چنل ناموفق: {e}")
+    # ۲) تحویل به مشتری — تلگرام مستقیم؛ واتساپ/اینستا/سایت با لینکِ همان پستِ چنل
+    if req.get("channel") and req.get("channel") != "telegram":
+        txt = ("🎥 عکس و ویدئوی روی مچ‌دستِ ساعتی که خواسته بودید آماده شد"
+               + (f" ({req.get('name','')})" if req.get("name") else "") + ":\n"
+               + (f"https://t.me/{config.MEDIA_CHANNEL}/{posted.message_id}" if posted else ""))
+        try:
+            await _notify_channel(req["channel"], req["customer_id"], txt.strip())
+        except Exception as e:  # noqa: BLE001
+            print(f"[tg] تحویلِ مدیا به کانالِ {req.get('channel')} ناموفق: {e}")
+    else:
+        try:
+            await context.bot.copy_message(chat_id=req["customer"], from_chat_id=config.STAFF_GROUP_ID, message_id=m.message_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"[tg] تحویل مدیا به مشتری ناموفق: {e}")
+    # درخواست را pop نمی‌کنیم — همکاران معمولاً چند عکس/ویدئو پشتِ‌سرِ هم روی همان پیام ریپلای می‌کنند
 
 
 def _wrist_answer(ctx):
@@ -1000,9 +1024,10 @@ async def _deliver(context, msg, user, source_text, answer, ctx):
     # درخواستِ زندهٔ مدیا از همکاران (وقتی در چنل نبود ولی کالا ارسال‌فوری بود)
     req = ctx.get("wrist_media_request")
     if req and config.STAFF_GROUP_ID:
-        sent = await _post_staff_request(context, req)
+        sent = await _post_staff_request(context.bot, req)
         if sent:
             _media_requests[sent.message_id] = {"customer": msg.chat_id, "reference": req.get("reference", ""), "name": req.get("name", "")}
+            _save_handoffs()   # ماندگار — تا ری‌استارت، تحویلِ مدیا به مشتری را نشکند
     # ثبتِ سفارش: منتظرِ عکسِ فیش از همین کاربر باش
     if ctx.get("order") and user:
         _pending_orders[user.id] = {"order": ctx["order"], "chat_id": msg.chat_id}

@@ -294,7 +294,7 @@ async def _reply_context_sheet(rc):
     except Exception as e:  # noqa: BLE001
         print(f"[assistant] get_product ناموفق ({brief['id']})؛ از brief استفاده می‌کنم: {type(e).__name__}: {e}")
         full = brief  # به‌جای خطای کامل، با همان خلاصهٔ کارت جواب بده
-    parts = [full.get("name", "")]
+    parts = [full.get("name", ""), f"آیدی: {brief['id']}"]   # آیدی لازم است تا مدل ابزارها (مچ/جزئیات) را بدونِ پرسیدن صدا بزند
     if full.get("price_label"):
         parts.append("قیمت: " + full["price_label"])
     if full.get("shipping_time"):
@@ -309,7 +309,9 @@ async def _reply_context_sheet(rc):
         return ""
     return ("⚡ مشتری به کارتِ یک محصولِ مشخص ریپلای کرده و دربارهٔ **همان** می‌پرسد. "
             f"مشخصاتِ کاملِ همان محصول: {sheet}. فقط دربارهٔ همین محصول جواب بده، "
-            "محصولِ دیگری را با آن اشتباه نگیر و کارتِ جدید نشان نده مگر مشتری صریحاً بخواهد.")
+            "محصولِ دیگری را با آن اشتباه نگیر و کارتِ جدید نشان نده مگر مشتری صریحاً بخواهد. "
+            f"اگر عکس/ویدئوی روی مچ خواست، همین حالا get_wrist_media({brief['id']}) را صدا بزن — "
+            "⛔ هرگز از مشتری آیدی/لینک/رفرنس نخواه؛ همه‌چیز همین‌جا هست.")
 
 
 async def answer_messages(messages, system_extra="", render_cards_inline=True, reply_context=None, customer=None):
@@ -325,10 +327,21 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
     """
     system = persona.system_prompt() + _ab_extra((customer or {}).get("channel"), (customer or {}).get("id"))
     extra = (system_extra or "").strip()
-    if reply_context:  # مشتری به کارتِ یک محصول ریپلای کرده → مشخصاتِ همان را قطعی تزریق کن
-        sheet = await _reply_context_sheet(reply_context)
-        if sheet:
-            extra = (extra + "\n\n" + sheet).strip() if extra else sheet
+    # مشتری ممکن است به «یک یا چند» کارتِ محصول ریپلای کرده باشد → مشخصاتِ همه را قطعی تزریق کن
+    _rcs = (reply_context if isinstance(reply_context, list) else ([reply_context] if reply_context else []))[:4]
+    if _rcs:
+        sheets = []
+        for _rc in _rcs:
+            s = await _reply_context_sheet(_rc)
+            if s:
+                sheets.append(s)
+        if sheets:
+            joined = "\n\n".join(sheets)
+            if len(sheets) > 1:
+                joined = (f"⚡ مشتری به {len(sheets)} محصولِ مختلف ریپلای کرده — برای **هر کدام جداگانه و مرتب** "
+                          "پاسخ بده (مثلاً هر خواسته/سؤال را به محصولِ خودش وصل کن؛ اگر برای همه مدیای مچ خواست، "
+                          "برای هر محصول جدا get_wrist_media را صدا بزن):\n\n" + joined)
+            extra = (extra + "\n\n" + joined).strip() if extra else joined
     if extra:
         system = system + "\n\n" + extra
 
@@ -362,8 +375,11 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
         return ("", {})
 
     ctx: dict = {}
-    if reply_context and (reply_context.get("name") or "").strip():
-        ctx["reacted_product"] = reply_context["name"].strip()   # ری‌اکشنِ کاربر به کارتِ این محصول (برای آمارِ تقاضا)
+    _rc_names = [(r.get("name") or "").strip() for r in _rcs if isinstance(r, dict) and (r.get("name") or "").strip()]
+    if _rc_names:
+        ctx["reacted_product"] = _rc_names[0]        # ری‌اکشنِ کاربر به کارتِ محصول (برای آمارِ تقاضا)
+        if len(_rc_names) > 1:
+            ctx["reacted_products"] = _rc_names[:4]  # چند محصول ریپلای شده → همه در آمار شمرده شوند
     # ردگیریِ کارت‌های نشان‌داده‌شده per (channel,user) → عدمِ‌تکرار + صفحه‌بندیِ ۷→۵→۳ روی کانال‌ها
     _ck = (str(customer.get("channel") or "ch"), str(customer.get("id"))) if (customer and customer.get("id")) else None
     if _ck:
