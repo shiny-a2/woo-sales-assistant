@@ -78,6 +78,13 @@ def recent(limit=200, level=None):
         return []
 
 
+def _fu_count_24h(svc):
+    """تعدادِ فالوآپ‌های ارسال‌شدهٔ ۲۴ ساعتِ اخیرِ یک کانال (از لاگِ واحد)."""
+    cutoff = time.time() - 24 * 3600
+    return sum(1 for r in recent(800) if r.get("svc") == svc and r.get("lvl") == "sent"
+               and float(r.get("ts", 0)) >= cutoff)
+
+
 # ---------------- هلث‌چکِ رفتاریِ روزانهٔ کانال‌ها ----------------
 async def run_channel_checks():
     """یک پیام/پروبِ تستِ رفتاری به هر کانال؛ نتیجه: {channel: {ok, note}}."""
@@ -116,7 +123,7 @@ async def run_channel_checks():
                                     or "wa9Xb3Qm7Lr2Tn8Kp4Vz"})   # پیش‌فرضِ داشبوردِ wa وقتی .env خالی است
             d = r.json()
             await _mark("whatsapp", bool(d.get("ready")), f"followup={d.get('followup')}")
-            await _mark("followup_wa", bool(d.get("followup")), "")
+            await _mark("followup_wa", bool(d.get("followup")), f"ارسالِ ۲۴س: {_fu_count_24h('followup_wa')}")
     except Exception as e:  # noqa: BLE001
         await _mark("whatsapp", False, f"{type(e).__name__}")
         await _mark("followup_wa", False, "unreachable")
@@ -129,10 +136,12 @@ async def run_channel_checks():
             s = (r.json() or {}).get("stats", {})
             await _mark("instagram", str(s.get("logged_in")) in ("1", "True", "true") and s.get("engine") == "running",
                         f"engine={s.get('engine')}")
-            await _mark("followup_ig", s.get("followup_engine") == "on", "")
+            await _mark("followup_ig", s.get("followup_engine") == "on", f"ارسالِ ۲۴س: {_fu_count_24h('followup_ig')}")
     except Exception as e:  # noqa: BLE001
         await _mark("instagram", False, f"{type(e).__name__}")
         await _mark("followup_ig", False, "unreachable")
+    # فالوآپِ تلگرام (مکانیزمِ داخلیِ مغز؛ شمارشِ ارسال‌های ۲۴ ساعت)
+    await _mark("followup_tg", True, f"ارسالِ ۲۴س: {_fu_count_24h('followup_tg')}")
 
     # ۵) یوزربات (پاسخ‌گویی روشن)
     try:
@@ -205,11 +214,16 @@ async def daily_review():
             m = metrics.snapshot() if hasattr(metrics, "snapshot") else {}
         except Exception:  # noqa: BLE001
             pass
-        sys_p = ("تو مهندسِ پایش و بهبودِ یک دستیارِ فروشِ چند-کانالهٔ فارسی هستی. از لاگِ خطاها، وضعیتِ کانال‌ها و "
-                 "متریک‌ها، تحلیل کن: چه چیزهایی خراب یا ضعیف است و رفتارِ دستیار چطور باید بهتر شود. "
+        sys_p = ("تو «مدیرِ ارشدِ مارکتینگ (CMO)» گالری جواهریان هستی: هم رفتارشناسِ دقیقِ مشتری، هم فروشندهٔ "
+                 "حرفه‌ایِ باتجربهٔ ساعتِ لوکس. هر روز از دیدگاهِ یک مدیرِ ارشد به دادهٔ واقعیِ دیروز نگاه می‌کنی: "
+                 "لاگِ خطاها، سلامتِ کانال‌ها و متریک‌های فروش/رفتارِ مشتری. تحلیل کن: کجا مشتری از دست می‌رود، "
+                 "کدام رفتارِ دستیارِ فروش نرخِ تبدیل را پایین می‌آورد، چه الگوی رفتاری‌ای در مشتری‌ها دیده می‌شود "
+                 "(تردید، حساسیتِ قیمتی، رهاکردنِ سبد، سکوت بعد از دیدنِ محصول)، و چه تغییرِ رفتاریِ مشخصی فردا "
+                 "فروش را بالا می‌برد. مثلِ یک مدیرِ ارشد اولویت‌بندی کن: اثرِ فروش > زیبایی. "
                  "خروجی فقط JSON با این ساختار: "
-                 '{"summary":"خلاصهٔ فارسی ≤۳ جمله","issues":["..."],"notes":["حداکثر ۳ نکتهٔ رفتاریِ کوتاهِ فارسی '
-                 'برای خودِ دستیارِ فروش (نه کارِ فنی) که از فردا رعایت کند"]}')
+                 '{"summary":"جمع‌بندیِ مدیریتیِ فارسی ≤۳ جمله","issues":["مشکلاتِ مشاهده‌شده"],'
+                 '"notes":["حداکثر ۳ دستورِ رفتاریِ کوتاهِ فارسی برای دستیارِ فروش — دقیق، قابلِ‌اجرا در گفتگو، '
+                 'با منطقِ فروش/رفتارشناسی (نه کارِ فنی)"]}')
         user_p = ("لاگِ خطاهای اخیر:\n" + json.dumps(errs[-60:], ensure_ascii=False)[:6000]
                   + "\n\nوضعیتِ کانال‌ها:\n" + json.dumps(chk, ensure_ascii=False)[:1500]
                   + "\n\nمتریک‌ها:\n" + json.dumps(m, ensure_ascii=False)[:1500])
@@ -219,13 +233,19 @@ async def daily_review():
         raw = (resp.choices[0].message.content or "").strip()
         raw = raw[raw.find("{"): raw.rfind("}") + 1]
         d = json.loads(raw)
+        prev = lessons()   # تاریخچهٔ تغییرات: هر روز چه آموخته‌هایی اعمال شد (لاگِ تغییراتِ خودبهبودی)
+        hist = (prev.get("history") or [])
+        if prev.get("date") and prev.get("notes"):
+            hist.append({"date": prev["date"], "notes": prev["notes"], "report": prev.get("report", "")})
         out = {"date": _now_str(), "report": d.get("summary", ""), "issues": d.get("issues", [])[:6],
-               "notes": [str(n)[:280] for n in (d.get("notes") or [])[:3]]}
+               "notes": [str(n)[:280] for n in (d.get("notes") or [])[:3]],
+               "history": hist[-30:]}
         tmp = _LESSONS + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False)
         os.replace(tmp, _LESSONS)
-        log("self-improve", "info", f"بازبینی انجام شد: {len(out['notes'])} آموخته")
+        # لاگِ صریحِ «تغییرِ رفتار» — چه چیزی جایگزینِ چه چیزی شد
+        log("self-improve", "change", "آموخته‌های جدید: " + " | ".join(out["notes"])[:300])
         return out
     except Exception as e:  # noqa: BLE001
         log("self-improve", "error", f"{type(e).__name__}: {e}")

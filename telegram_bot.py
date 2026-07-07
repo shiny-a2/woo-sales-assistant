@@ -160,8 +160,18 @@ async def _followup_after(context, chat_id, user_id):
         # متنِ پیگیری را مغز بر اساسِ همین گفتگو می‌سازد (نه ثابت)؛ اگر نشد → متنِ ثابت
         txt = await assistant.generate_followup(sessions.history(CHANNEL, user_id), "", "telegram")
         await context.bot.send_message(chat_id, txt or _FOLLOWUP_TEXT)
+        try:
+            import health
+            health.log("followup_tg", "sent", f"chat={chat_id}")   # رصدِ فالوآپ برای بررسیِ روزانه
+        except Exception:  # noqa: BLE001
+            pass
     except Exception as e:  # noqa: BLE001
         print(f"[tg] فالوآپ ناموفق: {e}")
+        try:
+            import health
+            health.log("followup_tg", "error", str(e)[:120])
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _schedule_followup(context, chat_id, user_id):

@@ -345,8 +345,12 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
     if extra:
         system = system + "\n\n" + extra
 
-    # سلامِ هوشمندِ ۶ ساعته (همهٔ کانال‌ها)
+    # سلامِ هوشمندِ ۶ ساعته (همهٔ کانال‌ها) + اعلامِ کانال (برای قواعدِ مخصوصِ کانال مثلِ لینک در اینستاگرام)
     if customer and customer.get("id"):
+        _chfa = {"whatsapp": "واتساپ", "instagram": "اینستاگرام", "telegram": "تلگرام", "web": "چتِ سایت"}
+        _chn = _chfa.get(str(customer.get("channel") or ""), "")
+        if _chn:
+            system = system + f"\n\n📡 کانالِ این گفتگو: {_chn}."
         _gh = _greeting_hint(str(customer.get("channel") or "ch"), str(customer.get("id")))
         if _gh:
             system = system + "\n\n" + _gh
@@ -391,6 +395,9 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
         text = ""
     text = textfmt.clean_for_chat(text)
     cards = ctx.get("cards") or []
+    # اینستاگرام لینک‌های بلندِ فارسیِ درصد-انکد را می‌شکند → لینکِ کوتاهِ ?p=ID (اسکی و کوتاه)
+    if (customer or {}).get("channel") == "instagram":
+        _short_links_for_ig(cards)
     if cards and render_cards_inline:  # کانالِ متن‌محور: متن را پاک و کارت‌ها را به‌صورت متن ضمیمه کن
         intro = textfmt.strip_product_lines(text) or "چند گزینهٔ خوب و مناسب براتون پیدا کردم 🌟 در ادامه ببینید:"
         text = (intro + "\n\n" + _cards_as_text(cards)).strip()
@@ -519,6 +526,8 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         ctx["ask_staff"] = True   # فقط وقتی مغز صریحاً درماند → ارجاع به همکاران (نه catch-all)
         text = text.replace("‹ASKSTAFF›", "").replace("<ASKSTAFF>", "").replace("ASKSTAFF", "").strip()
     cards = ctx.get("cards") or []
+    if (customer or {}).get("channel") == "instagram":
+        _short_links_for_ig(cards)   # لینکِ کوتاه برای اینستاگرام
     _intro = "چند ساعتِ نزدیک به تصویری که فرستادید پیدا کردم 🌟 ببینید:"
     if cards and render_cards_inline:
         intro = textfmt.strip_product_lines(text) or _intro
@@ -534,6 +543,18 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         sessions.add_shown(_ck[0], _ck[1], [c.get("id") for c in cards if c.get("id")])
     _record_metrics((customer or {}).get("channel"), ctx, caption, (customer or {}).get("name"), (customer or {}).get("id"), image=True, answer=text)
     return (text, ctx)
+
+
+def _short_links_for_ig(cards):
+    """لینکِ محصولات برای اینستاگرام: اسلاگِ فارسیِ درصد-انکد (بلند/شکستنی) → لینکِ کوتاهِ ?p=ID."""
+    try:
+        import config
+        base = config.WOO_URL.rstrip("/")
+        for c in (cards or []):
+            if c.get("id"):
+                c["url"] = f"{base}/?p={c['id']}"
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _cards_as_text(cards):
