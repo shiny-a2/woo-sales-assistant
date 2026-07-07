@@ -54,6 +54,9 @@ _STORE_REFERRAL_KW = ["حضوری", "به شعبه", "شعبهٔ", "شعبه م�
 
 def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False, answer=""):
     """شمردنِ عملکرد + تحلیلِ رفتارِ مشتری: پاسخ/کانال + رویدادهای کلیدی (سفارش/رسید/ارجاع/مدیا) + سیگنال‌های فروش."""
+    _repair = _sell = _store = False
+    _abk = ""
+    _u, _a = (user_text or ""), (answer or "")
     try:
         ch = str(channel or "")
         metrics.bump("reply", ch)
@@ -67,12 +70,14 @@ def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False, an
             metrics.bump("receipt", ch)
         if ctx.get("wrist_media") or ctx.get("wrist_media_request"):
             metrics.bump("wrist_media", ch)
-        _u, _a = (user_text or ""), (answer or "")
-        if any(k in _u for k in _REPAIR_KW):          # درخواستِ تعمیر
+        _repair = any(k in _u for k in _REPAIR_KW)          # درخواستِ تعمیر
+        _sell = any(k in _u for k in _SELL_KW)              # قصدِ فروشِ ساعتِ مشتری به ما
+        _store = any(k in _a for k in _STORE_REFERRAL_KW)   # ارجاع به فروشگاهِ حضوری (در پاسخِ مغز)
+        if _repair:
             metrics.bump("repair", ch)
-        if any(k in _u for k in _SELL_KW):            # قصدِ فروشِ ساعتِ مشتری به ما
+        if _sell:
             metrics.bump("sell_intent", ch)
-        if any(k in _a for k in _STORE_REFERRAL_KW):  # ارجاع به فروشگاهِ حضوری (در پاسخِ مغز)
+        if _store:
             metrics.bump("store_referral", ch)
         import salescfg
         _abk, _ = salescfg.ab_assign(f"{ch}:{cid}")
@@ -82,13 +87,17 @@ def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False, an
                 metrics.bump("ab_order", _abk)
     except Exception:  # noqa: BLE001
         pass
+    sig = None
     try:
-        analytics.record(channel, cid, name, user_text, ctx)
+        sig = analytics.record(channel, cid, name, user_text, ctx)
     except Exception:  # noqa: BLE001
         pass
     try:
         import crm_index
-        crm_index.touch(channel, cid, name)   # افزودنِ خودکارِ هویتِ مخاطب به ایندکسِ کانتکت‌ها
+        # DNA: هویت + رفتار را در پروفایلِ واحد تجمیع کن (سیگنال‌ها از analytics، بدونِ استخراجِ دوباره)
+        s = dict(sig or {})
+        s.update({"repair": _repair, "sell_intent": _sell, "store_referral": _store, "ab": _abk})
+        crm_index.observe(channel, cid, name, s)
     except Exception:  # noqa: BLE001
         pass
 
@@ -102,6 +111,18 @@ def _greeting_hint(channel, user_id):
         return ("⏳ وضعیتِ گفتگو: ادامه‌دار (کمتر از ۶ ساعت از پیامِ قبلی گذشته). پس **دوباره سلام/احوال‌پرسی نکن**؛ "
                 "مستقیم و طبیعی ادامه بده و به پیام‌های قبلیِ همین گفتگو (ارسالی و دریافتی) دقت کن تا پاسخت دقیق باشد.")
     return "⏳ وضعیتِ گفتگو: تازه یا پس از وقفهٔ بیش از ۶ ساعت. پاسخت را با یک سلامِ گرمِ کوتاهِ متناسبِ زمان شروع کن."
+
+
+def _dna_hint_msg(channel, uid):
+    """پیامِ سیستمیِ «پروفایلِ DNA مشتری» (برندها/علایق/سیگنال‌ها/سابقه) — مستقل از شماره؛ خالی اگر پروفایلی نبود."""
+    if not (channel and uid):
+        return None
+    try:
+        import crm_index
+        h = crm_index.dna_hint(str(channel), str(uid))
+        return {"role": "system", "content": h} if h else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _ab_extra(channel, uid):
@@ -141,6 +162,9 @@ async def reply(channel, user_id, text, user_name=None, customer_phone=None):
     ph = _phone_hint(customer_phone)
     if ph:
         messages.append(ph)
+    _dna = _dna_hint_msg(channel, user_id)   # پروفایلِ رفتاریِ مشتری (مستقل از شماره)
+    if _dna:
+        messages.append(_dna)
     if customer_phone:   # سابقهٔ خریدِ مشتری (کش‌شده) را به مغز بده تا شخصی‌سازی کند
         try:
             import crm_index
@@ -196,6 +220,9 @@ async def reply_image(channel, user_id, image_data_url, caption="", user_name=No
     hint = _name_hint(user_name)
     if hint:
         messages.append(hint)
+    _dna = _dna_hint_msg(channel, user_id)   # پروفایلِ رفتاریِ DNA
+    if _dna:
+        messages.append(_dna)
     messages.extend(sessions.history(channel, user_id))
     messages.append({"role": "user", "content": [
         {"type": "text", "text": user_text},
@@ -289,6 +316,10 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
             system = system + "\n\n" + _gh
 
     convo = [{"role": "system", "content": system}]
+    if customer and customer.get("id"):   # پروفایلِ رفتاریِ DNA (مستقل از شماره)
+        _dna = _dna_hint_msg(customer.get("channel"), customer.get("id"))
+        if _dna:
+            convo.append(_dna)
     if customer:   # سابقهٔ خریدِ مشتری (برای واتساپ، آیدی همان شماره است)
         _ph = customer.get("phone") or (customer.get("id") if customer.get("channel") == "whatsapp" else None)
         if _ph:
@@ -402,9 +433,15 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         "به همکاران ارجاع نده و محصول نشان نده؛ در عوض مؤدبانه و گرم مشتری را وارد گفتگو کن "
         "(بپرس دنبالِ چه ساعتی هستند یا چطور می‌توانی کمکشان کنی). "
         "**حتماً پاسخت را دقیقاً با نشانهٔ ‹NOWATCH› شروع کن** — این نشانه فقط برای سیستم است و حذف می‌شود.\n"
-        "• اگر **ساعت است ولی مطمئن نیستی** (برند/مدل واضح نیست، تصویر مبهم است، یا مطمئن نیستی موجود داریم): "
-        "**محصولِ حدسی نشان نده**؛ فقط بگو «عکستون رو دیدم، برای دقت از همکارانم می‌پرسم و جوابتون رو می‌فرستم 🙏» "
-        "(تا به گروهِ همکاران ارجاع شود). هرگز محصول یا برندِ اشتباه به مشتری نسبت نده.")
+        "• 🎯 **اول خودت تلاش کن، نه ارجاع به همکاران:** اگر ساعت است، حتی وقتی برند/مدل کاملاً واضح نیست، "
+        "از روی تصویر جنسیت (اگر روشن است) + رنگِ صفحه/بند + استایل + برندِ روی صفحه (اگر پیداست) را دربیاور و "
+        "**حتماً با search_watches نزدیک‌ترین‌ها را پیدا و با show_products کارت نشان بده** و بگو «دقیقاً همین رو نداریم ولی این‌ها خیلی نزدیک‌اند». "
+        "اگر مشتری کنارِ عکس چیزی **پرسیده** (قیمت، موجودی، اصل/اورجینال بودن، گارانتی): **همان را مستقیم جواب بده** — "
+        "قیمت/موجودی را از روی همان محصولی که پیدا می‌کنی بگو، و برای اصالت/گارانتی با اطمینان بگو همهٔ ساعت‌ها اورجینال و باگارانتیِ رسمی‌اند و مُهرِ ضمانتِ مادام‌العمرِ اصالت روی فاکتور می‌خورد. "
+        "**هیچ‌وقت برای پرسشِ قیمت/اصالت/گارانتی به همکاران ارجاع نده؛ خودت جواب داری.**\n"
+        "• فقط و فقط اگر تصویر واقعاً مبهم است و **حتی بعد از تلاش نتوانستی هیچ ساعتی پیدا کنی و هیچ پرسشی هم نداشت که خودت جواب بدهی**: "
+        "**پاسخت را دقیقاً با نشانهٔ ‹ASKSTAFF› شروع کن** و کوتاه بگو «عکستون رو دیدم، برای دقتِ بیشتر از همکارانم می‌پرسم و جوابتون رو همین‌جا می‌فرستم 🙏» "
+        "(این نشانه فقط برای سیستم است و حذف می‌شود؛ تا به همکاران ارجاع شود). هرگز محصول یا برندِ اشتباه به مشتری نسبت نده.")
     user_text += _IMAGE_TEXT_HINT
     _sys = persona.system_prompt() + _ab_extra((customer or {}).get("channel"), (customer or {}).get("id"))
     if customer and customer.get("id"):
@@ -412,6 +449,10 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         if _gh:
             _sys = _sys + "\n\n" + _gh
     convo = [{"role": "system", "content": _sys}]
+    if customer and customer.get("id"):   # پروفایلِ رفتاریِ DNA (مستقل از شماره)
+        _dna = _dna_hint_msg(customer.get("channel"), customer.get("id"))
+        if _dna:
+            convo.append(_dna)
     for m in (messages or []):
         role = m.get("role")
         content = (m.get("content") or "").strip()
@@ -435,6 +476,9 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
     if "‹NOWATCH›" in text[:40] or "<NOWATCH>" in text[:40] or "NOWATCH" in text[:20]:
         ctx["not_watch"] = True   # عکسِ غیرِ ساعت → مشتری را وارد گفتگو کن، به همکاران ارجاع نده
         text = text.replace("‹NOWATCH›", "").replace("<NOWATCH>", "").replace("NOWATCH", "").strip()
+    if "‹ASKSTAFF›" in text[:40] or "<ASKSTAFF>" in text[:40] or "ASKSTAFF" in text[:20]:
+        ctx["ask_staff"] = True   # فقط وقتی مغز صریحاً درماند → ارجاع به همکاران (نه catch-all)
+        text = text.replace("‹ASKSTAFF›", "").replace("<ASKSTAFF>", "").replace("ASKSTAFF", "").strip()
     cards = ctx.get("cards") or []
     _intro = "چند ساعتِ نزدیک به تصویری که فرستادید پیدا کردم 🌟 ببینید:"
     if cards and render_cards_inline:

@@ -201,6 +201,24 @@ async def brain_analytics(x_sb_token: str = Header(None, alias="X-SB-Token")):
     return snap
 
 
+@app.get("/api/brain/dna/list")
+async def brain_dna_list(limit: int = 60, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """فهرستِ پروفایل‌های واحدِ مشتری (DNA) — کانتکتِ ادغام‌شدهٔ همهٔ کانال‌ها + خلاصهٔ رفتار/خرید."""
+    _check_sb_token(x_sb_token)
+    import crm_index
+    return {"ok": True, "stats": crm_index.stats(), "profiles": crm_index.top_profiles(limit=max(1, min(limit, 200)))}
+
+
+@app.get("/api/brain/dna/get")
+async def brain_dna_get(pid: str = "", channel: str = "", cid: str = "",
+                        x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """پروفایلِ کاملِ یک مشتری (با pid یا با channel+cid)."""
+    _check_sb_token(x_sb_token)
+    import crm_index
+    prof = crm_index.get_profile(pid) if pid else crm_index.profile(channel, cid)
+    return {"ok": bool(prof), "profile": prof or {}}
+
+
 class MgrChatIn(BaseModel):
     question: str = ""
     model: str | None = None
@@ -611,8 +629,8 @@ async def brain_vision(body: VisionIn, x_sb_token: str = Header(None, alias="X-S
                 name=cust.get("name", ""), amount=receipt.get("amount", ""), extra=extra)
         except Exception as e:  # noqa: BLE001
             print(f"[brain] ارسالِ رسیدِ کانالی به گروه ناموفق: {type(e).__name__}: {e}")
-    elif (not cards) and (not ctx.get("ask_gender")) and (not ctx.get("not_watch")) and cust and body.image_b64 and _tg_app:
-        # ساعت بود ولی محصولی پیدا نشد → ارجاع به گروهِ عکس‌وویدئو (نه اگر جنسیت پرسیده یا اصلاً ساعت نبوده)
+    elif ctx.get("ask_staff") and cust and body.image_b64 and _tg_app:
+        # فقط وقتی مغز صریحاً درماند (نشانهٔ ASKSTAFF) → ارجاع؛ دیگر catch-all نیست و پاسخِ واقعیِ مغز را دور نمی‌ریزد
         try:
             import base64 as _b64
 
@@ -621,7 +639,7 @@ async def brain_vision(body: VisionIn, x_sb_token: str = Header(None, alias="X-S
             escalated = await telegram_bot.post_staff_escalation(
                 _tg_app.bot, img, cust.get("channel", ""), cust.get("id", ""),
                 name=cust.get("name", ""), question=(body.caption or ""))
-            if escalated:
+            if escalated and not (text or "").strip():
                 text = ("عکستون رو دیدم 🙏 برای اینکه دقیق راهنماییتون کنم همین الان از همکارانم می‌پرسم و "
                         "تا چند دقیقهٔ دیگه جوابتون رو همین‌جا می‌فرستم 🌟")
         except Exception as e:  # noqa: BLE001

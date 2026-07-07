@@ -171,8 +171,11 @@ def record(channel, cid, name, user_msg, ctx):
                 top = sorted(_M["leads"].items(), key=lambda kv: kv[1].get("score", 0), reverse=True)[:_MAX_LEADS]
                 _M["leads"] = dict(top)
         _save()
+        # سیگنال‌های استخراج‌شده را برمی‌گردانیم تا crm_index (DNA) هم بدونِ استخراجِ دوباره تجمیع کند
+        return {"level": level, "sentiment": sentiment, "brands": brands, "products": products,
+                "objection": bool(obj), "order": bool(order)}
     except Exception:  # noqa: BLE001
-        pass
+        return None
 
 
 HOT_ALERT_THRESHOLD = 6  # امتیازِ خرید که «داغ» حساب می‌شود (≈ ۳ سیگنالِ خریدِ تجمعی)

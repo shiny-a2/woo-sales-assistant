@@ -512,6 +512,7 @@ async def relay_user_photo_to_group(bot, channel, customer_id, image_bytes, text
     if not anchor:
         return False
     gid = config.SUPPORT_GROUP_ID or config.STAFF_GROUP_ID
+    text = _clean_user_caption(text)
     cap = ("👤 " + (name or "مشتری") + " 📷" + (f": «{text}»" if text else " (عکس فرستاد)"))
     cap = cap[:1024]   # سقفِ کپشنِ تلگرام
     try:
@@ -581,6 +582,27 @@ async def _on_xrcp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+# کپشنِ خودکارِ انگلیسیِ اینستاگرام (alt-text) که کاربر ننوشته — نباید به‌جای «پیامِ کاربر» در گروه بیفتد
+_IG_ALT_PATTERNS = [
+    r"may be an image of[^\n]*",
+    r"no photo description available\.?",
+    r"this photo is not available\.?",
+    r"photo by [^\n]*",
+    r"image may contain[^\n]*",
+]
+
+
+def _clean_user_caption(text):
+    """متنِ همراهِ عکس را از کپشنِ خودکارِ انگلیسیِ اینستاگرام پاک می‌کند تا «پیامِ کاربر» انگلیسی نشود."""
+    import re
+    t = (text or "").strip()
+    if not t:
+        return ""
+    for p in _IG_ALT_PATTERNS:
+        t = re.sub(p, "", t, flags=re.IGNORECASE)
+    return t.strip(" \n\t—-:،,.")
+
+
 # ---------- ارجاعِ عکسِ پیدا‌نشده به همکاران (همهٔ کانال‌ها) ----------
 _escalations = {}   # group_message_id → {channel, customer_id, name}
 
@@ -593,6 +615,7 @@ async def post_staff_escalation(bot, image_bytes, channel, customer_id, name="",
     gid = config.SUPPORT_GROUP_ID or config.ORDERS_GROUP_ID or config.STAFF_GROUP_ID
     if not gid or not image_bytes:
         return False
+    question = _clean_user_caption(question)
     cap = ("❓ سوالِ مشتری دربارهٔ این عکس — کانال: " + _CHANNEL_FA.get(channel, channel) + "\n"
            + (f"👤 {name}\n" if name else "")
            + (f"💬 «{question}»\n" if question else "")
