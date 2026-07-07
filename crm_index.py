@@ -89,6 +89,9 @@ def _init_schema(conn):
         CREATE INDEX IF NOT EXISTS ix_ident_ph ON identities(phone9);
         CREATE INDEX IF NOT EXISTS ix_pers_seen ON persons(last_seen);
         CREATE INDEX IF NOT EXISTS ix_pers_oc ON persons(orders_count);
+        CREATE TABLE IF NOT EXISTS crm_push(
+            phone TEXT PRIMARY KEY, first TEXT, last TEXT, tg_id TEXT, pushed INTEGER DEFAULT 0);
+        CREATE INDEX IF NOT EXISTS ix_push ON crm_push(pushed);
     """)
     conn.commit()
 
@@ -218,6 +221,48 @@ def _apply_name(p, entry, raw):
         pass
 
 
+def _maybe_queue_crm(p, conn):
+    """اگر پروفایل نامِ فارسیِ خوب + شماره دارد، برای «نوشتنِ برگشتی به CRM» صف کن (سینکِ دوطرفه)."""
+    try:
+        import config
+        if not getattr(config, "CRM_NAME_UPDATE_URL", ""):
+            return
+        import names as _names
+        nm = p.get("name", "")
+        phones = p.get("phones") or []
+        if not (nm and phones) or not _names.is_good_persian(nm):
+            return
+        first, last = _names.split(nm)
+        if not first:
+            return
+        ph = _digits(phones[0])
+        tg = ""
+        for i in p.get("identities", []):
+            if i.get("channel") == "telegram":
+                tg = str(i.get("cid"))
+                break
+        row = conn.execute("SELECT first,last FROM crm_push WHERE phone=?", (ph,)).fetchone()
+        if row and row[0] == first and row[1] == last:
+            return   # همین نام قبلاً صف/ارسال شده
+        conn.execute("INSERT INTO crm_push(phone,first,last,tg_id,pushed) VALUES(?,?,?,?,0) "
+                     "ON CONFLICT(phone) DO UPDATE SET first=excluded.first,last=excluded.last,"
+                     "tg_id=excluded.tg_id,pushed=0", (ph, first, last, tg))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def pop_crm_pushes(limit=10):
+    rows = _c().execute("SELECT phone,first,last,tg_id FROM crm_push WHERE pushed=0 LIMIT ?",
+                        (max(1, limit),)).fetchall()
+    return [{"phone": r[0], "first": r[1], "last": r[2], "tg_id": r[3]} for r in rows]
+
+
+def mark_crm_pushed(phone):
+    c = _c()
+    c.execute("UPDATE crm_push SET pushed=1 WHERE phone=?", (phone,))
+    c.commit()
+
+
 def _person_for(entry, conn):
     """پروفایلِ متناظرِ یک هویت را بده/بساز و هویت را به آن وصل کن (بدونِ ذخیرهٔ نهایی)."""
     pid = entry.get("pid")
@@ -323,13 +368,14 @@ def link(channel, cid, phone=None, name=None, ig_id=None):
     if ig_id:
         e["ig_id"] = str(ig_id)
     p = _person_for(e, conn)
-    if name:
-        _apply_name(p, e, name)
     if phone:
         e["phone"] = _digits(phone)
-        p = _link_phone(e, phone, conn)
+        p = _link_phone(e, phone, conn)   # اول ادغام با شماره (p ممکن است عوض شود)
+    if name:
+        _apply_name(p, e, name)           # سپس نام روی پروفایلِ نهایی (وگرنه با reloadِ merge گم می‌شود)
     _put_ident(e, conn)
     _store_person(p, conn)
+    _maybe_queue_crm(p, conn)
     conn.commit()
     return e
 
@@ -383,6 +429,7 @@ def observe(channel, cid, name=None, signals=None):
         p["updated_at"] = now
         _put_ident(e, conn)
         _store_person(p, conn)
+        _maybe_queue_crm(p, conn)
         conn.commit()
     except Exception:  # noqa: BLE001
         pass

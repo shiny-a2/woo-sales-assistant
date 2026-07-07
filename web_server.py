@@ -828,6 +828,32 @@ async def _daily_analysis_loop():
         await asyncio.sleep(1800)
 
 
+async def _crm_name_sync_loop():
+    """صفِ «نامِ نرمال‌شده» را به CRMِ سایت می‌فرستد (سینکِ دوطرفه، نرم و انسانی)."""
+    await asyncio.sleep(90)
+    import crm_index
+    if not getattr(config, "CRM_NAME_UPDATE_URL", ""):
+        return
+    import httpx
+    while True:
+        try:
+            for it in crm_index.pop_crm_pushes(10):
+                payload = {"phone": it["phone"], "first_name": it["first"], "last_name": it["last"]}
+                if it.get("tg_id"):
+                    payload["telegram_id"] = it["tg_id"]
+                try:
+                    async with httpx.AsyncClient(timeout=15) as c:
+                        await c.post(config.CRM_NAME_UPDATE_URL, json=payload,
+                                     headers={"X-A2-Token": config.CRM_NAME_UPDATE_TOKEN})
+                except Exception as e:  # noqa: BLE001
+                    print(f"[crm-sync] ارسالِ نام ناموفق: {type(e).__name__}")
+                crm_index.mark_crm_pushed(it["phone"])
+                await asyncio.sleep(2)   # نرم و انسانی
+        except Exception as e:  # noqa: BLE001
+            print(f"[crm-sync] خطای حلقه: {e!r}")
+        await asyncio.sleep(60)
+
+
 async def _dna_backfill_startup():
     """اگر هنوز پروفایلِ DNA ساخته نشده، خزندهٔ backfill را یک‌بار اجرا کن (از سفارش‌های موجود)."""
     await asyncio.sleep(45)   # بگذار ایندکس/سرویس بالا بیاید
@@ -849,6 +875,7 @@ async def serve(tg_app=None):
     asyncio.create_task(_hot_lead_alert_loop())  # هشدارِ لحظه‌ایِ مشتریِ داغ به گروهِ CRM
     asyncio.create_task(_product_sync_loop())    # ایندکسِ محلیِ محصولات (جستجوی آنی)
     asyncio.create_task(_dna_backfill_startup())  # خزندهٔ DNA: اگر پروفایلی نیست، از سفارش‌های موجود بساز
+    asyncio.create_task(_crm_name_sync_loop())    # نوشتنِ برگشتیِ نامِ نرمال‌شده به CRM (سینکِ دوطرفه)
     # log_config=None تا uvicorn لاگینگ را روی stdout بازپیکربندی نکند (با لاگ تهرانِ main تداخل دارد)
     cfg = uvicorn.Config(app, host=config.WEB_HOST, port=config.WEB_PORT, log_level="warning", log_config=None)
     server = uvicorn.Server(cfg)

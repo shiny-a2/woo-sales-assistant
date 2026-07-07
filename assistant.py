@@ -100,10 +100,12 @@ def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False, an
         crm_index.observe(channel, cid, name, s)
         # شمارهٔ کشف‌شده در گفتگو (ثبتِ سفارش یا ارجاع به انسان) → روی هویت ثبت کن تا با پروفایلِ
         # هم‌شماره (خریدها/دیگر کانال‌ها) ادغام و DNA کامل شود. کلیدِ «سینکِ بعدی» همین است.
-        _ph = ((ctx.get("order") or {}).get("phone") or "").strip() or \
-              ((ctx.get("handoff") or {}).get("contact") or "").strip()
+        _order = ctx.get("order") or {}
+        _ph = (_order.get("phone") or "").strip() or ((ctx.get("handoff") or {}).get("contact") or "").strip()
+        _onm = (_order.get("customer_name") or "").strip()   # نامِ فاکتور (بالاترین اولویتِ نام)
         if _ph:
-            crm_index.link(channel, cid, phone=_ph)
+            # خرید/سفارش → شماره + نامِ فاکتور روی همین هویت؛ با هر چتِ کانالیِ هم‌شماره یکی می‌شود
+            crm_index.link(channel, cid, phone=_ph, name=(_onm or None))
     except Exception:  # noqa: BLE001
         pass
 
