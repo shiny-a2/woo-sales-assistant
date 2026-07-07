@@ -219,6 +219,17 @@ async def brain_dna_get(pid: str = "", channel: str = "", cid: str = "",
     return {"ok": bool(prof), "profile": prof or {}}
 
 
+@app.post("/api/brain/dna/crawl")
+async def brain_dna_crawl(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """خزندهٔ DNA را دستی اجرا کن: از سفارش‌های موجودِ ووکامرس، پروفایل‌های واحدِ مشتری بساز/به‌روز کن."""
+    _check_sb_token(x_sb_token)
+    import crm_index
+    if crm_index._CRAWL.get("running"):
+        return {"ok": False, "error": "already running", "crawl": crm_index.stats().get("crawl")}
+    asyncio.create_task(crm_index.crawl_from_woo())
+    return {"ok": True, "started": True}
+
+
 class MgrChatIn(BaseModel):
     question: str = ""
     model: str | None = None
@@ -799,12 +810,27 @@ async def _daily_analysis_loop():
         await asyncio.sleep(1800)
 
 
+async def _dna_backfill_startup():
+    """اگر هنوز پروفایلِ DNA ساخته نشده، خزندهٔ backfill را یک‌بار اجرا کن (از سفارش‌های موجود)."""
+    await asyncio.sleep(45)   # بگذار ایندکس/سرویس بالا بیاید
+    try:
+        import crm_index
+        if crm_index.stats().get("persons", 0) > 0:
+            return
+        print("[dna] خزندهٔ backfill شروع شد (ساختِ DNA از سفارش‌های موجود)…")
+        r = await crm_index.crawl_from_woo()
+        print(f"[dna] خزنده تمام شد: {r}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[dna] خطای خزندهٔ backfill: {type(e).__name__}: {e}")
+
+
 async def serve(tg_app=None):
     global _tg_app
     _tg_app = tg_app
     asyncio.create_task(_daily_analysis_loop())  # زمان‌بندِ تحلیلِ روزانه
     asyncio.create_task(_hot_lead_alert_loop())  # هشدارِ لحظه‌ایِ مشتریِ داغ به گروهِ CRM
     asyncio.create_task(_product_sync_loop())    # ایندکسِ محلیِ محصولات (جستجوی آنی)
+    asyncio.create_task(_dna_backfill_startup())  # خزندهٔ DNA: اگر پروفایلی نیست، از سفارش‌های موجود بساز
     # log_config=None تا uvicorn لاگینگ را روی stdout بازپیکربندی نکند (با لاگ تهرانِ main تداخل دارد)
     cfg = uvicorn.Config(app, host=config.WEB_HOST, port=config.WEB_PORT, log_level="warning", log_config=None)
     server = uvicorn.Server(cfg)

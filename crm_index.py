@@ -21,6 +21,7 @@ REFRESH_H = 12
 
 _M: dict = {}   # "channel:cid" -> identity: {channel, cid, phone, name, ig_id, pid, orders, checked_at}
 _P: dict = {}   # pid -> person profile (DNA)
+_CRAWL: dict = {"running": False, "last": 0, "phones": 0, "orders": 0, "error": ""}   # وضعیتِ خزندهٔ backfill
 
 _PAID = ("completed", "processing", "on-hold", "deliver", "delivered")
 
@@ -440,7 +441,74 @@ def stats():
     buyers = sum(1 for p in _P.values() if (p.get("crm") or {}).get("orders_count"))
     multichannel = sum(1 for p in _P.values() if len(p.get("channels") or {}) > 1)
     return {"persons": total, "with_phone": withphone, "buyers": buyers, "multichannel": multichannel,
-            "identities": len(_M)}
+            "identities": len(_M),
+            "crawl": {"running": _CRAWL["running"], "last": _CRAWL["last"], "phones": _CRAWL["phones"],
+                      "orders": _CRAWL["orders"], "error": _CRAWL["error"]}}
+
+
+async def crawl_from_woo(max_orders=1500):
+    """خزندهٔ backfill: از سفارش‌های موجودِ ووکامرس، پروفایلِ واحدِ DNA برای مشتری‌های قبلی می‌سازد.
+
+    مشتری‌ها را بر اساسِ «شماره» گروه‌بندی می‌کند و برای هر شماره یک هویتِ seed (channel=site) +
+    پروفایل با سابقهٔ خرید می‌سازد. بعداً وقتی همان مشتری از هر کانالی پیام داد و شماره‌اش معلوم شد،
+    _link_phone او را در همین پروفایل ادغام و در همهٔ کانال‌ها سینک می‌کند.
+    """
+    if _CRAWL["running"]:
+        return {"ok": False, "error": "already running"}
+    _CRAWL["running"] = True
+    _CRAWL["error"] = ""
+    try:
+        import woo
+        groups = {}   # last9 → {phone, name, orders[]}
+        page = 1
+        processed = 0
+        while processed < max_orders and page <= 60:
+            try:
+                rows = await woo.get("orders", {"per_page": 50, "page": page, "orderby": "date", "order": "desc"})
+            except Exception as e:  # noqa: BLE001
+                _CRAWL["error"] = f"woo page {page}: {e}"
+                break
+            if not isinstance(rows, list) or not rows:
+                break
+            for o in rows:
+                billing = o.get("billing") or {}
+                ph = _digits(billing.get("phone") or "")
+                if len(ph) < 9:
+                    continue
+                g = groups.setdefault(ph[-9:], {"phone": ph, "name": "", "orders": []})
+                nm = ((billing.get("first_name") or "") + " " + (billing.get("last_name") or "")).strip()
+                if nm and not g["name"]:
+                    g["name"] = nm
+                g["orders"].append({
+                    "number": o.get("number") or o.get("id"),
+                    "date": (o.get("date_created") or "")[:10],
+                    "status": o.get("status") or "",
+                    "items": [(li.get("name") or "").strip() for li in (o.get("line_items") or []) if li.get("name")][:4],
+                })
+            processed += len(rows)
+            if len(rows) < 50:
+                break
+            page += 1
+        for g in groups.values():          # ساختِ پروفایل‌ها از داده‌های جمع‌شده
+            e = _M.setdefault(_key("site", g["phone"]), {"channel": "site", "cid": g["phone"]})
+            e["phone"] = g["phone"]
+            if g["name"]:
+                e["name"] = g["name"]
+            e["orders"] = g["orders"]
+            e["checked_at"] = _now()
+            p = _person_for(e)
+            if g["name"]:
+                _add_name(p, g["name"])
+            _link_phone(e, g["phone"])
+            _apply_crm(p, g["orders"])
+        _CRAWL.update({"last": _now(), "phones": len(groups), "orders": processed})
+        _save()
+        return {"ok": True, "phones": len(groups), "orders": processed}
+    except Exception as e:  # noqa: BLE001
+        _CRAWL["error"] = str(e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        _CRAWL["running"] = False
 
 
 _load()
