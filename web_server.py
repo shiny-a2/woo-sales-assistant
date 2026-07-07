@@ -242,8 +242,8 @@ async def brain_mgr_chat(body: MgrChatIn, x_sb_token: str = Header(None, alias="
 
 class TgBroadcastIn(BaseModel):
     text: str = ""
-    min_delay: float = 1.5
-    max_delay: float = 3.5
+    min_delay: float = 0.1   # رباتِ رسمیِ تلگرام ~۳۰ پیام/ثانیه مجاز است؛ ارسال سریع، شروع/توقف دستی
+    max_delay: float = 0.2
     file_b64: str = ""     # فایلِ اختیاری (عکس/سند) — base64
     file_name: str = ""
     mime: str = ""
@@ -320,8 +320,8 @@ async def brain_tg_broadcast(body: TgBroadcastIn, x_sb_token: str = Header(None,
         is_image = (body.mime or "").startswith("image/")
     if not text and file_bytes is None:
         return {"ok": False, "error": "متن یا فایل بده"}
-    dmin = max(0.5, float(body.min_delay or 1.5))
-    dmax = max(dmin, float(body.max_delay or 3.5))
+    dmin = max(0.05, float(body.min_delay or 0.1))   # فقط رعایتِ سقفِ مجازِ تلگرام (~۳۰/ثانیه)
+    dmax = max(dmin, float(body.max_delay or 0.2))
     asyncio.create_task(_run_broadcast(text, dmin, dmax, file_bytes, body.file_name, is_image))
     return {"ok": True, "total": len(botusers.all_ids())}
 

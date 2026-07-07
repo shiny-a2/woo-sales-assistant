@@ -104,20 +104,46 @@ def _fmt_hint(entry):
 
 
 async def history_hint(channel, cid, phone):
-    """راهنمای سابقهٔ خرید برای تزریق به پرامپت (کش‌شده؛ فقط هر REFRESH_H ساعت به سایت می‌زند)."""
+    """راهنمای سابقهٔ خرید برای تزریق به پرامپت (کش‌شده؛ فقط هر REFRESH_H ساعت به سایت می‌زند).
+
+    سینکِ بین‌کانالی: با معلوم‌شدنِ «شماره»، هویتِ همان مشتری در کانال‌های دیگر (واتساپ/اینستا/تلگرام/سایت)
+    به هم وصل می‌شود — سابقهٔ خرید و نام بینِ همهٔ ورودی‌های هم‌شماره مشترک و هم‌زمان می‌ماند.
+    """
     if not phone:
         return ""
     e = _M.setdefault(_key(channel, cid), {"channel": channel, "cid": str(cid or "")})
     e["phone"] = _digits(phone)
     now = time.time()
     if "orders" not in e or (now - float(e.get("checked_at", 0))) > REFRESH_H * 3600:
+        # اول از هویت‌های هم‌شماره در کانال‌های دیگر (اگر تازه دارند) — بدونِ زدن به سایت
+        fresh = None
+        for o in by_phone(phone):
+            if o is not e and "orders" in o and (now - float(o.get("checked_at", 0))) < REFRESH_H * 3600:
+                fresh = o
+                break
+        if fresh:
+            e["orders"] = fresh["orders"]
+            e["checked_at"] = fresh.get("checked_at", now)
+        else:
+            try:
+                import woo
+                e["orders"] = await woo.customer_orders(phone)
+                e["checked_at"] = now
+            except Exception:  # noqa: BLE001
+                e.setdefault("orders", [])
+        # انتشارِ سابقه و نام به همهٔ هویت‌های هم‌شمارهٔ این مشتری (سینکِ بین‌کانالی)
         try:
-            import woo
-            e["orders"] = await woo.customer_orders(phone)
-            e["checked_at"] = now
-            _save()
+            for o in by_phone(phone):
+                if o is not e:
+                    o["orders"] = e.get("orders", [])
+                    o["checked_at"] = e.get("checked_at", now)
+                    if e.get("name") and not o.get("name"):
+                        o["name"] = e["name"]
+                    if o.get("name") and not e.get("name"):
+                        e["name"] = o["name"]
         except Exception:  # noqa: BLE001
-            e.setdefault("orders", [])
+            pass
+        _save()
     return _fmt_hint(e)
 
 
