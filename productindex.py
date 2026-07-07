@@ -114,18 +114,30 @@ async def sync(force=False):
     _META["syncing"] = True
     t0 = time.time()
     try:
+        import asyncio
+
         import woo
         acc = []
         page = 1
-        while page <= 60:   # سقفِ ایمنی (۶۰۰۰ محصول)
-            rows = await woo.get("products", {"per_page": 100, "page": page, "status": "publish"})
+        per = 50   # صفحهٔ سبک‌تر: هاستِ کند پاسخِ بزرگ را قطره‌ای می‌دهد و read-timeout را دور می‌زند
+        while page <= 120:   # سقفِ ایمنی (۶۰۰۰ محصول)
+            try:
+                # تایم‌اوتِ سختِ هر صفحه — تا یک پاسخِ قطره‌ای کلِ همگام‌سازی را ساعت‌ها قفل نکند
+                rows = await asyncio.wait_for(
+                    woo.get("products", {"per_page": per, "page": page, "status": "publish"}), timeout=120)
+            except asyncio.TimeoutError:
+                _META["last_error"] = f"page {page} timeout"
+                print(f"[productindex] صفحهٔ {page} تایم‌اوت شد — ادامه در دورِ بعد")
+                break
             if not isinstance(rows, list) or not rows:
                 break
             acc.extend(_slim(p) for p in rows)
             _INDEX = acc      # ذخیرهٔ افزایشی: جستجو زودتر داده دارد و ری‌استارت پیشرفت را نمی‌بازد
             _META.update({"synced_at": time.time(), "count": len(acc), "last_error": ""})
             _save()
-            if len(rows) < 100:
+            if page % 10 == 0:
+                print(f"[productindex] {len(acc)} محصول تا صفحهٔ {page}")
+            if len(rows) < per:
                 break
             page += 1
         _META["duration"] = round(time.time() - t0, 1)
