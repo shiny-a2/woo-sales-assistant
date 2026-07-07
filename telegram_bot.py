@@ -571,6 +571,21 @@ async def relay_user_photo_to_group(bot, channel, customer_id, image_bytes, text
         return False
 
 
+async def reset_all_handoffs(bot):
+    """همهٔ اتصال‌های زندهٔ فعال را می‌بندد و گفتگوها را به دستیارِ هوشمند برمی‌گرداند (ریستِ سراسری)."""
+    keys = list(_handoff_active.keys())
+    done = []
+    for ch, cid in keys:
+        try:
+            if await end_handoff(bot, ch, cid):
+                done.append(f"{ch}:{cid}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[tg] ریستِ هندآف {ch}:{cid} ناموفق: {e}")
+    _escalations.clear()
+    _save_handoffs()
+    return done
+
+
 async def end_handoff(bot, channel, customer_id):
     """پایانِ اتصالِ زنده: وضعیت پاک، پرچمِ کانال پاک (handoff_off)، و به مشتری اطلاع تا AI برگردد."""
     key = (channel, str(customer_id))
@@ -879,6 +894,10 @@ async def _on_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ریپلایِ اپراتور روی «اتصالِ زنده» → رله به مشتری؛ یا فرمانِ «پایان» → بازگشت به AI
     if m.reply_to_message and m.chat_id in {config.SUPPORT_GROUP_ID, config.STAFF_GROUP_ID}:
         h = _handoffs.get(m.reply_to_message.message_id)
+        # لاگِ تشخیصی: ببینیم ریپلایِ اپراتور به هندآف نگاشت می‌شود یا نه (ریشه‌یابیِ «پایان کار نمی‌کند»)
+        print(f"[tg] ریپلایِ گروه روی msg={m.reply_to_message.message_id} → "
+              f"{'هندآفِ ' + h['channel'] + ':' + h['customer_id'] if h else 'نگاشتی نیست'} "
+              f"| متن={(m.text or m.caption or '')[:30]!r} | نگاشت‌های موجود={list(_handoffs.keys())[:8]}")
         if h:
             answer = (m.text or m.caption or "").strip()
             if answer and (_norm_end(answer) in _HANDOFF_END_WORDS or _HANDOFF_END_RE.match(answer)):

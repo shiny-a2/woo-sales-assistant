@@ -230,6 +230,26 @@ async def brain_dna_crawl(x_sb_token: str = Header(None, alias="X-SB-Token")):
     return {"ok": True, "started": True}
 
 
+@app.post("/api/brain/handoff/reset-all")
+async def brain_handoff_reset(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """همهٔ اتصال‌های زندهٔ فعال (هندآف) را ببند و گفتگوها را به دستیارِ هوشمند برگردان."""
+    _check_sb_token(x_sb_token)
+    if not _tg_app:
+        return {"ok": False, "error": "telegram app not ready"}
+    import telegram_bot as _tb
+    done = await _tb.reset_all_handoffs(_tg_app.bot)
+    return {"ok": True, "closed": done, "count": len(done)}
+
+
+@app.get("/api/brain/handoff/status")
+async def brain_handoff_status(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    _check_sb_token(x_sb_token)
+    import telegram_bot as _tb
+    return {"ok": True, "active": [{"channel": k[0], "cid": k[1], "anchor": v}
+                                   for k, v in _tb._handoff_active.items()],
+            "mapped_msgs": len(_tb._handoffs), "escalations": len(_tb._escalations)}
+
+
 @app.post("/api/brain/dna/import-userbot")
 async def brain_dna_import_userbot(x_sb_token: str = Header(None, alias="X-SB-Token")):
     """بانکِ کانتکتِ یوزربات (CRMِ سایت + واتساپ + چت‌ها) را به بانکِ واحدِ DNA وارد/ادغام کن."""
