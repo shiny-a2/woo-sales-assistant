@@ -503,10 +503,14 @@ async def start_handoff(bot, channel, customer_id, name="", first_message="", re
     if key in _handoff_active:
         await relay_user_to_group(bot, channel, customer_id, first_message, name)
         return True
+    _reason = (reason or "").strip()
+    if _reason and not re.search(r"[ء-ی]", _reason):   # موضوعِ غیرفارسی (انگلیسی) → پیش‌فرضِ فارسی
+        _reason = "درخواستِ گفتگو با پشتیبانی"
+    _fm = _clean_user_caption(first_message)            # پاک‌سازیِ کپشنِ خودکارِ انگلیسیِ اینستاگرام
     cap = ("🔴 اتصالِ زندهٔ مشتری به اپراتور — کانال: " + _CHANNEL_FA.get(channel, channel) + "\n"
            + (f"👤 {name}\n" if name else "")
-           + (f"📌 موضوع: {reason}\n" if reason else "")
-           + (f"💬 «{first_message}»\n" if first_message else "")
+           + (f"📌 موضوع: {_reason}\n" if _reason else "")
+           + (f"💬 «{_fm}»\n" if _fm else "")
            + "\n👈 روی همین پیام **ریپلای** کنید تا مستقیم برای مشتری برود.\n"
            + "🟢 برای پایان و بازگرداندن به دستیارِ هوشمند، در ریپلای بنویسید: «پایان».")
     try:
