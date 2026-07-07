@@ -491,7 +491,7 @@ async def crawl_from_woo(max_orders=1500):
             if len(rows) < 50:
                 break
             page += 1
-        for g in groups.values():          # ساختِ پروفایل‌ها از داده‌های جمع‌شده
+        for g in groups.values():          # ساختِ پروفایلِ خریدارها از سفارش‌ها
             e = _M.setdefault(_key("site", g["phone"]), {"channel": "site", "cid": g["phone"]})
             e["phone"] = g["phone"]
             if g["name"]:
@@ -503,9 +503,41 @@ async def crawl_from_woo(max_orders=1500):
                 _add_name(p, g["name"])
             _link_phone(e, g["phone"])
             _apply_crm(p, g["orders"])
-        _CRAWL.update({"last": _now(), "phones": len(groups), "orders": processed})
+        # پاسِ دوم: مشتریانِ ثبت‌نامیِ سایت (شاملِ «لیدها»یی که هنوز خرید نکرده‌اند) → پروفایلِ seed
+        leads = 0
+        cpage = 1
+        while cpage <= 40:
+            try:
+                crows = await woo.get("customers", {"per_page": 50, "page": cpage,
+                                                    "orderby": "registered_date", "order": "desc"})
+            except Exception:  # noqa: BLE001
+                break
+            if not isinstance(crows, list) or not crows:
+                break
+            for c in crows:
+                b = c.get("billing") or {}
+                ph = _digits(b.get("phone") or "")
+                if len(ph) < 9:
+                    continue
+                nm = ((c.get("first_name") or b.get("first_name") or "") + " "
+                      + (c.get("last_name") or b.get("last_name") or "")).strip()
+                e = _M.setdefault(_key("site", ph), {"channel": "site", "cid": ph})
+                e["phone"] = ph
+                if nm and not e.get("name"):
+                    e["name"] = nm
+                p = _person_for(e)
+                if nm:
+                    _add_name(p, nm)
+                if not (c.get("is_paying_customer")) and "lead" not in p.get("interests", []) and not (p.get("crm") or {}).get("orders_count"):
+                    p.setdefault("interests", []).append("lead")   # لیدِ غیرخریدار (ثبت‌نامی)
+                _link_phone(e, ph)
+                leads += 1
+            if len(crows) < 50:
+                break
+            cpage += 1
+        _CRAWL.update({"last": _now(), "phones": len(groups), "orders": processed, "leads": leads})
         _save()
-        return {"ok": True, "phones": len(groups), "orders": processed}
+        return {"ok": True, "phones": len(groups), "orders": processed, "leads": leads}
     except Exception as e:  # noqa: BLE001
         _CRAWL["error"] = str(e)
         return {"ok": False, "error": str(e)}

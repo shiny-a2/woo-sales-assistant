@@ -98,6 +98,12 @@ def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False, an
         s = dict(sig or {})
         s.update({"repair": _repair, "sell_intent": _sell, "store_referral": _store, "ab": _abk})
         crm_index.observe(channel, cid, name, s)
+        # شمارهٔ کشف‌شده در گفتگو (ثبتِ سفارش یا ارجاع به انسان) → روی هویت ثبت کن تا با پروفایلِ
+        # هم‌شماره (خریدها/دیگر کانال‌ها) ادغام و DNA کامل شود. کلیدِ «سینکِ بعدی» همین است.
+        _ph = ((ctx.get("order") or {}).get("phone") or "").strip() or \
+              ((ctx.get("handoff") or {}).get("contact") or "").strip()
+        if _ph:
+            crm_index.link(channel, cid, phone=_ph)
     except Exception:  # noqa: BLE001
         pass
 
