@@ -22,6 +22,8 @@ REFRESH_H = 12
 
 _CONN = None
 _CRAWL: dict = {"running": False, "last": 0, "phones": 0, "orders": 0, "leads": 0, "error": ""}
+_IMPORT: dict = {"running": False, "source": "", "done": 0, "total": 0, "error": ""}
+_UB_DB = os.path.join(os.path.dirname(_HERE), "tg-outreach", "data", "outreach.db")   # SQLiteِ یوزربات
 
 _PAID = ("completed", "processing", "on-hold", "deliver", "delivered")
 
@@ -71,6 +73,7 @@ def _c():
         _CONN = sqlite3.connect(_DB, check_same_thread=False)
         _CONN.execute("PRAGMA journal_mode=WAL")
         _CONN.execute("PRAGMA synchronous=NORMAL")
+        _CONN.execute("PRAGMA busy_timeout=8000")   # هم‌زیستیِ مغز و ایمپورت/اسکریپت روی همان DB (WAL)
         _init_schema(_CONN)
         _migrate_json_if_needed(_CONN)
     return _CONN
@@ -244,12 +247,14 @@ def _link_phone(entry, phone, conn):
     p9 = _ph9(ph)
     if not p9:
         return p
+    _store_person(p, conn)   # پروفایلِ فعلی (شاید تازه‌ساز) باید در DB باشد تا merge بتواند لودش کند
     other = {r[0] for r in conn.execute("SELECT DISTINCT pid FROM identities WHERE phone9=? AND pid<>?",
                                         (p9, p["pid"]))}
     for opid in other:
         keep, drop = sorted([p["pid"], opid])
         _merge_persons(keep, drop, conn)
         p = _load_person(keep, conn)
+    entry["pid"] = p["pid"]   # هویت به پروفایلِ نگه‌داشته‌شدهٔ نهایی وصل بماند (اگر keep عوض شد)
     entry["phone"] = ph
     return p
 
@@ -611,3 +616,64 @@ async def crawl_from_woo(max_orders=1500):
         return {"ok": False, "error": str(e)}
     finally:
         _CRAWL["running"] = False
+
+
+def import_userbot(db_path=None):
+    """کانتکت‌های بانکِ یوزربات (SQLite: CRMِ سایت + واتساپ + چت‌ها) را به بانکِ واحدِ DNA وارد کن.
+
+    برای هر کانتکت: اگر tg_id دارد هویتِ «telegram:<tg_id>» (که با چت‌های واقعیِ تلگرام هم یکی می‌شود)،
+    وگرنه هویتِ «crm:<phone>». نام با موتورِ فارسی نرمال می‌شود و با ادغامِ شماره در پروفایلِ واحد می‌نشیند.
+    همگام (blocking) است؛ از یک پراسسِ جدا اجرا شود تا حلقهٔ مغز بلاک نشود (WAL + busy_timeout هم‌زیستی می‌دهد).
+    """
+    if _IMPORT["running"]:
+        return {"ok": False, "error": "already running"}
+    _IMPORT.update({"running": True, "source": "userbot", "done": 0, "total": 0, "error": ""})
+    try:
+        import sqlite3 as _sq
+        import names
+        path = db_path or _UB_DB
+        src = _sq.connect(f"file:{path}?mode=ro", uri=True)
+        rows = src.execute("SELECT phone, name, tg_id FROM contacts").fetchall()
+        src.close()
+        _IMPORT["total"] = len(rows)
+        conn = _sq.connect(_DB, check_same_thread=False)   # اتصالِ اختصاصی؛ با _CONNِ مغز تداخل نکند
+        conn.execute("PRAGMA busy_timeout=15000")
+        n = 0
+        for phone, name, tg_id in rows:
+            ph = _digits(phone or "")
+            nm = names.normalize(name or "")
+            if tg_id:
+                ch, cid = "telegram", str(tg_id)
+            elif len(ph) >= 9:
+                ch, cid = "crm", ph
+            else:
+                continue
+            e = _get_ident(ch, cid, conn) or {"channel": ch, "cid": cid, "source": "userbot"}
+            if ph:
+                e["phone"] = ph
+            if nm and not e.get("name"):
+                e["name"] = nm
+            p = _person_for(e, conn)
+            if len(ph) >= 9:
+                p = _link_phone(e, ph, conn)
+            if nm:
+                _add_name(p, nm)
+                if names.should_replace(p.get("name", ""), nm):
+                    p["name"] = nm
+            cur = p.get("name", "")
+            p["name"] = names.normalize(cur) or cur   # نامِ نهایی همیشه فارسیِ تمیز
+            _put_ident(e, conn)
+            _store_person(p, conn)
+            n += 1
+            _IMPORT["done"] = n
+            if n % 500 == 0:
+                conn.commit()
+        conn.commit()
+        conn.close()
+        _IMPORT["done"] = n
+        return {"ok": True, "imported": n, "total": len(rows)}
+    except Exception as e:  # noqa: BLE001
+        _IMPORT["error"] = str(e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        _IMPORT["running"] = False

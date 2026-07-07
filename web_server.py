@@ -230,6 +230,24 @@ async def brain_dna_crawl(x_sb_token: str = Header(None, alias="X-SB-Token")):
     return {"ok": True, "started": True}
 
 
+@app.post("/api/brain/dna/import-userbot")
+async def brain_dna_import_userbot(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """بانکِ کانتکتِ یوزربات (CRMِ سایت + واتساپ + چت‌ها) را به بانکِ واحدِ DNA وارد/ادغام کن."""
+    _check_sb_token(x_sb_token)
+    import crm_index
+    if crm_index._IMPORT.get("running"):
+        return {"ok": False, "error": "already running", "import": dict(crm_index._IMPORT)}
+    asyncio.create_task(asyncio.to_thread(crm_index.import_userbot))   # ترد جدا با اتصالِ اختصاصی
+    return {"ok": True, "started": True}
+
+
+@app.get("/api/brain/dna/import-status")
+async def brain_dna_import_status(x_sb_token: str = Header(None, alias="X-SB-Token")):
+    _check_sb_token(x_sb_token)
+    import crm_index
+    return {"ok": True, "import": dict(crm_index._IMPORT), "stats": crm_index.stats()}
+
+
 class MgrChatIn(BaseModel):
     question: str = ""
     model: str | None = None
