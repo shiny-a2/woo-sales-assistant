@@ -61,6 +61,7 @@ def _load():
         _META["count"] = len(_INDEX)
     except Exception:  # noqa: BLE001
         _INDEX = []
+    _META["syncing"] = False   # فلگِ دیسک از پراسسِ قبلی معتبر نیست؛ وگرنه سینک برای همیشه قفل می‌مانَد
 
 
 def _save():
