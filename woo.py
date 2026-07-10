@@ -340,6 +340,21 @@ async def search_by_reference(reference, limit=6):
             seen.add(pid)
             out.append(b)
 
+    # ۰) فست‌پسِ ایندکسِ محلی (میلی‌ثانیه‌ای) — رفرنس‌یابی نباید گروگانِ هاستِ کند باشد
+    try:
+        import productindex
+        for p in productindex.all_products():
+            hay = _norm(p.get("name")) + "|" + _norm(p.get("sku")) + "|" + \
+                  _norm(" ".join(str(o) for o in attr_options(p, "رفرانس")))
+            if want and want in hay:
+                _consider(p)
+                if len(out) >= per:
+                    break
+    except Exception:  # noqa: BLE001
+        pass
+    if out:
+        return out[:per]
+
     # ۱) جستجوی متنیِ ووکامرس (عنوان/SKU) — کدِ خام و نسخه‌های بی‌خط‌تیره/بی‌فاصله
     for q in {ref, ref.replace("-", " "), ref.replace("-", ""), ref.replace(" ", "")}:
         try:
@@ -379,6 +394,15 @@ async def resolve_product(url="", name="", reference=""):
     اولویت ۱) اسلاگِ url (یکتا) ۲) کدِ رفرنس (از reference یا داخلِ نام) ۳) نام. خروجی: brief یا None."""
     slug = _slug_from_url(url)
     if slug:
+        try:  # فست‌پسِ محلی: اسلاگ داخلِ permalink ایندکس (میلی‌ثانیه‌ای؛ درصد-انکد/خام هر دو)
+            import productindex
+            from urllib.parse import unquote
+            sl = unquote(slug).lower()
+            for p in productindex.all_products():
+                if sl and sl in unquote(p.get("permalink") or "").lower():
+                    return _product_brief(p)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             items = await get("products", {"slug": slug, "status": "publish"})
             if items:

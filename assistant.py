@@ -560,7 +560,7 @@ async def _fetch_wrist_files(ids):
     try:
         import config
         import httpx
-        async with httpx.AsyncClient(timeout=90) as c:
+        async with httpx.AsyncClient(timeout=150) as c:
             r = await c.get("http://127.0.0.1:8091/api/media/fetch",
                             params={"ids": ",".join(str(i) for i in ids)},
                             headers={"X-SB-Token": config.SALE_BRAIN_TOKEN})
