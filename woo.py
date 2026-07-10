@@ -33,6 +33,19 @@ def _client():
     return _api
 
 
+def tolerant_json(text):
+    """JSONِ پاسخِ سایت حتی اگر با بایت‌های آشغال شروع شود (مثلاً فایلِ افزونه با پیشوندِ AppleDouble آپلود شده
+    و همهٔ پاسخ‌های REST آلوده شده‌اند) — از اولین { یا [ پارس می‌کند."""
+    import json as _json
+    try:
+        return _json.loads(text)
+    except Exception:  # noqa: BLE001
+        starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+        if not starts:
+            raise
+        return _json.loads(text[min(starts):])
+
+
 def _get_sync(endpoint, params=None):
     # هاستِ فروشگاه گاهی اتصال را ری‌ست/کند می‌کند؛ چند تلاشِ کوتاه (OSError هم گرفته می‌شود برای WinError 10054)
     last = None
@@ -40,8 +53,8 @@ def _get_sync(endpoint, params=None):
         try:
             resp = _client().get(endpoint, params=params or {})
             resp.raise_for_status()
-            return resp.json()
-        except (RequestException, OSError) as e:
+            return tolerant_json(resp.text)
+        except (RequestException, OSError, ValueError) as e:
             last = e
             if attempt < 2:
                 time.sleep(0.5 * (attempt + 1))

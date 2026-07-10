@@ -531,7 +531,8 @@ async def _fetch_insights(p, phone):
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.get(config.CRM_INSIGHTS_URL, params={"phone": phone},
                             headers={"X-A2-Token": config.CRM_INSIGHTS_TOKEN})
-        d = r.json() if r.status_code == 200 else {}
+        import woo
+        d = woo.tolerant_json(r.text) if r.status_code == 200 else {}
         if not (d.get("ok") and d.get("found")):
             return
         crm = p.setdefault("crm", {})
