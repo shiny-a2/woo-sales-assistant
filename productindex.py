@@ -107,7 +107,7 @@ def get_product(pid):
     return None
 
 
-async def _crawl(params, acc, seen_ids, max_pages=300):
+async def _crawl(params, acc, seen_ids, max_pages=600):   # سقف ۳۰هزار — کاتالوگِ واقعی ۲۵هزار+ است
     """یک پیمایشِ صفحه‌به‌صفحه با پارامترهای داده‌شده؛ نتایج به acc اضافه و ذخیرهٔ افزایشی می‌شود."""
     global _INDEX
     import asyncio
