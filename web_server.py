@@ -342,6 +342,14 @@ async def brain_sales_report(x_sb_token: str = Header(None, alias="X-SB-Token"))
     if not isinstance(rec, dict):
         rec = {"ok": False}
     rec["history"] = sales_ai.history()[:12]
+    try:  # تاریخِ شمسیِ آخرین بروزرسانی (نمایشِ داشبورد)
+        import datetime as _dt
+
+        import clock
+        _g = _dt.datetime.strptime(rec.get("generated_at", ""), "%Y-%m-%d %H:%M")
+        rec["generated_at_shamsi"] = clock.jalali_str(_g)
+    except Exception:  # noqa: BLE001
+        pass
     return rec
 
 
@@ -891,9 +899,11 @@ async def _product_sync_loop():
         try:
             st = productindex.status()
             stale = (st["count"] == 0) or (st["age_min"] is None) or (st["age_min"] > productindex.refresh_hours() * 60)
+            if productindex._META.get("full_incomplete") and not st["syncing"]:
+                stale = True   # سینکِ کاملِ ناتمام (مثلاً ری‌استارت وسطِ کار) → بلافاصله ادامه بده
             if stale and not st["syncing"]:
                 full_age_d = (time.time() - float(productindex._META.get("full_at", 0) or 0)) / 86400
-                if st["count"] == 0 or full_age_d > 7:
+                if st["count"] == 0 or full_age_d > 7 or productindex._META.get("full_incomplete"):
                     # پیمایشِ کامل: اولین‌بار یا هفتگی (پاک‌سازیِ حذف‌شده‌ها) — اولویت با موجودها
                     print("[productindex] همگام‌سازیِ کاملِ کاتالوگ (اولویت: موجودها)…")
                     print("[productindex]", await productindex.sync())
@@ -1012,7 +1022,8 @@ async def _dna_backfill_startup():
 async def serve(tg_app=None):
     global _tg_app
     _tg_app = tg_app
-    asyncio.create_task(_daily_analysis_loop())  # زمان‌بندِ تحلیلِ روزانه
+    # تحلیلِ هوشمند دیگر خودکارِ روزانه اجرا نمی‌شود — فقط با دکمهٔ «بروزرسانی» در داشبورد (خواستهٔ مدیر؛ مدیریتِ مصرف)
+    # asyncio.create_task(_daily_analysis_loop())
     asyncio.create_task(_hot_lead_alert_loop())  # هشدارِ لحظه‌ایِ مشتریِ داغ به گروهِ CRM
     asyncio.create_task(_product_sync_loop())    # ایندکسِ محلیِ محصولات (جستجوی آنی)
     asyncio.create_task(_dna_backfill_startup())  # خزندهٔ DNA: اگر پروفایلی نیست، از سفارش‌های موجود بساز

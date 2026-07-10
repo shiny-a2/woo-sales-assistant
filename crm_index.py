@@ -510,10 +510,43 @@ async def history_hint(channel, cid, phone):
                 o["checked_at"] = e.get("checked_at", now)
                 _put_ident(o, conn)
         _apply_crm(p, e.get("orders") or [])
+        await _fetch_insights(p, phone)   # شناختِ CRM (بازدیدها/پیشنهادها) — اگر اندپوینت وصل باشد
         _store_person(p, conn)
     _put_ident(e, conn)
     conn.commit()
     return _fmt_history(e)
+
+
+async def _fetch_insights(p, phone):
+    """«شناختِ مشتری» از افزونهٔ CRM (محصولاتِ دیده‌شده + پیشنهادِ سلیقه‌محور) → داخلِ پروفایلِ DNA.
+
+    طبقِ docs/crm-insights-spec.md؛ تا وقتی CRM_INSIGHTS_URL تنظیم نشده بی‌صدا هیچ کاری نمی‌کند."""
+    try:
+        import config
+        if not getattr(config, "CRM_INSIGHTS_URL", ""):
+            return
+        if (_now() - float((p.get("crm") or {}).get("insights_at", 0))) < REFRESH_H * 3600:
+            return   # کشِ ۱۲ساعته
+        import httpx
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(config.CRM_INSIGHTS_URL, params={"phone": phone},
+                            headers={"X-A2-Token": config.CRM_INSIGHTS_TOKEN})
+        d = r.json() if r.status_code == 200 else {}
+        if not (d.get("ok") and d.get("found")):
+            return
+        crm = p.setdefault("crm", {})
+        crm["viewed"] = [{"name": v.get("name", ""), "url": v.get("url", "")}
+                         for v in (d.get("viewed_products") or [])[:6]]
+        crm["recommended"] = [{"id": v.get("id"), "name": v.get("name", ""), "url": v.get("url", "")}
+                              for v in (d.get("recommended_products") or [])[:5]]
+        crm["visits"] = (d.get("visits") or {}).get("total")
+        crm["insights_at"] = _now()
+        ct = d.get("contact") or {}
+        nm = ((ct.get("first_name") or "") + " " + (ct.get("last_name") or "")).strip()
+        if nm:
+            _apply_name(p, {"channel": "crm", "cid": phone}, nm)   # نامِ CRM (اولویتِ دومِ نام)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def dna_hint(channel, cid):
@@ -550,6 +583,12 @@ def dna_hint(channel, cid):
         extra = f" (آخرین خرید: {crm.get('last_order')})" if crm.get("last_order") else ""
         bits.append(f"مشتریِ قدیمی با {crm['orders_count']} سفارش{extra}"
                     + (f"؛ برندِ خریدِ قبلی: {crm['fav_brand']}" if crm.get("fav_brand") else ""))
+    if crm.get("viewed"):
+        bits.append("اخیراً در سایت این‌ها را دیده: " + "، ".join(v["name"] for v in crm["viewed"][:3] if v.get("name")))
+    if crm.get("recommended"):
+        bits.append("پیشنهادِ متناسب با سلیقه‌اش (از موتورِ CRM): "
+                    + "، ".join(v["name"] for v in crm["recommended"][:3] if v.get("name"))
+                    + " — اگر مناسبِ گفتگو بود، همین‌ها را ظریف پیشنهاد بده")
     chans = list((p.get("channels") or {}).keys())
     if len(chans) > 1:
         bits.append("از چند کانالِ مختلف با ما در ارتباط بوده (همان شخص)")

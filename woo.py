@@ -594,6 +594,13 @@ async def search_watches(gender=None, movement=None, dial_color=None, strap_colo
     # نامِ مستعار/مخفف/انگلیسیِ برند → نامِ کاملِ فارسی (مثلاً «سی‌کی/ck» → «کلوین کلاین»)
     brand = brands.canonical(brand) if brand else brand
     query = brands.normalize_text(query) if query else query
+    # مترادف‌های رایجِ «نوع موتور» در زبانِ مشتری → واژهٔ اتریبیوتِ سایت (وگرنه ۰ نتیجه → پیشنهادِ غلطِ کوارتز)
+    if movement:
+        _mvl = movement.strip().replace("‌", " ").lower()
+        if any(k in _mvl for k in ("کوکی", "خودکار", "اتومات", "مکانیک", "automatic", "mechanical")):
+            movement = "اتوماتیک"
+        elif any(k in _mvl for k in ("باتری", "باطری", "کوارتز", "quartz", "battery")):
+            movement = "کوارتز"
     # یک عددِ تکی → بازه‌ی هوشمند (۱۰٪ پایین تا ۱۵٪ بالا).
     # مقاوم در برابرِ خطای مدل: هر شکلی که «یک عدد» به آن رسیده باشد را به بازه تبدیل کن —
     # target_toman، یا min==max، یا فقط min، یا فقط max. (مستقل از کانال؛ همین‌جا تضمین می‌شود.)

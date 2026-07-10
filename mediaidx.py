@@ -16,7 +16,10 @@ def _norm_ref(s):
 
 def _slug_from_url(url):
     m = re.search(r"/product/([^/?#]+)", url or "", re.I)
-    return m.group(1).rstrip("/").lower() if m else ""
+    if not m:
+        return ""
+    from urllib.parse import unquote
+    return unquote(m.group(1).rstrip("/")).lower()   # اسلاگِ فارسیِ درصد-انکد ↔ خام یکسان شود
 
 
 def _load():

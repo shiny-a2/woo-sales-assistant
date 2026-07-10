@@ -101,6 +101,10 @@ SALE_BRAIN_TOKEN = _get("SALE_BRAIN_TOKEN", "")
 CRM_NAME_UPDATE_URL = _get("CRM_NAME_UPDATE_URL", "")
 CRM_NAME_UPDATE_TOKEN = _get("CRM_NAME_UPDATE_TOKEN", "")
 
+# ---------- شناختِ مشتری از CRM (بازدیدها/پیشنهادِ محصول) — docs/crm-insights-spec.md ----------
+CRM_INSIGHTS_URL = _get("CRM_INSIGHTS_URL", "")
+CRM_INSIGHTS_TOKEN = _get("CRM_INSIGHTS_TOKEN", _get("CRM_NAME_UPDATE_TOKEN", ""))
+
 
 def missing_required():
     """فهرست متغیرهای ضروریِ خالی را برمی‌گرداند (برای بررسی هنگام راه‌اندازی)."""

@@ -53,3 +53,24 @@ def utcnow():
 
 def tehran_now():
     return utcnow() + _TEHRAN
+
+
+def jalali_str(dt=None):
+    """تاریخِ شمسی «۱۴۰۴/۰۴/۱۹ ۲۱:۳۰» از یک datetimeِ میلادی (پیش‌فرض: اکنونِ تهران)."""
+    d = dt or tehran_now()
+    gy, gm, gd = d.year, d.month, d.day
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    gy2 = gy - 1600
+    days = 365 * gy2 + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400 - 80 + gd + g_d_m[gm - 1]
+    if gm > 2 and ((gy % 4 == 0 and gy % 100 != 0) or gy % 400 == 0):
+        days += 1
+    jy = 979 + 33 * (days // 12053)
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    jm = 1 + (days // 31 if days < 186 else 6 + (days - 186) // 30)
+    jd = 1 + (days % 31 if days < 186 else (days - 186) % 30)
+    return f"{jy:04d}/{jm:02d}/{jd:02d} {d.strftime('%H:%M')}"

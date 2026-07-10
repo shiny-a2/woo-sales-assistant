@@ -17,6 +17,7 @@ _FILE = os.path.join(_HERE, "data", "products_index.json")
 
 _INDEX: list = []
 _META: dict = {"synced_at": 0.0, "count": 0, "syncing": False, "last_error": "", "duration": 0}
+_OLD_SNAPSHOT: list = []   # پوششِ قبلی حینِ سینکِ کامل (تا قطعِ وسطِ راه، ایندکس را کوچک نکند)
 
 
 def _slim(p):
@@ -131,8 +132,10 @@ async def _crawl(params, acc, seen_ids, max_pages=600):   # سقف ۳۰هزار 
                 continue
             seen_ids.add(p.get("id"))
             acc.append(_slim(p))
-        _INDEX = acc      # ذخیرهٔ افزایشی: جستجو زودتر داده دارد و ری‌استارت پیشرفت را نمی‌بازد
-        _META.update({"synced_at": time.time(), "count": len(acc), "last_error": ""})
+        # ذخیرهٔ افزایشی؛ ⚠️ حینِ پیمایش، آیتم‌های قدیمیِ هنوز-نرسیده هم حفظ شوند تا اگر سینک وسطِ راه
+        # قطع شد، پوششِ جستجو «کوچک» نشود (تازه‌ها اول، قدیمی‌های باقی‌مانده تهِ فهرست)
+        _INDEX = acc + [p for p in _OLD_SNAPSHOT if p.get("id") not in seen_ids]
+        _META.update({"synced_at": time.time(), "count": len(_INDEX), "last_error": ""})
         _save()
         if page % 10 == 0:
             print(f"[productindex] {len(acc)} محصول تا صفحهٔ {page}")
@@ -150,17 +153,26 @@ async def sync(force=False):
     _META["syncing"] = True
     t0 = time.time()
     try:
+        global _OLD_SNAPSHOT
+        _OLD_SNAPSHOT = list(_INDEX)   # پوششِ فعلی حینِ پیمایش حفظ شود
+        _META["full_incomplete"] = True   # اگر وسطِ راه کشته شدیم، بعد از بوت ادامه داده شود
+        _save()
         acc = []
         seen = set()
         # پاسِ ۱: فقط موجودها (اولویتِ فروش) — سریع‌تر در دسترسِ جستجو قرار می‌گیرند
-        await _crawl({"stock_status": "instock"}, acc, seen)
+        ok1 = await _crawl({"stock_status": "instock"}, acc, seen)
         print(f"[productindex] پاسِ موجودها تمام شد: {len(acc)}")
         # پاسِ ۲: بقیهٔ کاتالوگ (ناموجودها) — برای شناساییِ کد/رفرنس و پیشنهادِ مشابه لازم‌اند
-        await _crawl({}, acc, seen)
+        ok2 = await _crawl({}, acc, seen)
+        if ok1 and ok2:
+            _INDEX = acc               # پیمایش کامل شد → فقط دادهٔ تازه (حذف‌شده‌ها پاک می‌شوند)
+            _META["full_at"] = time.time()
+            _META["full_incomplete"] = False
+            _META["count"] = len(_INDEX)
+        _OLD_SNAPSHOT = []
         _META["duration"] = round(time.time() - t0, 1)
-        _META["full_at"] = time.time()
         _save()
-        return {"ok": bool(acc), "count": len(acc), "duration": _META["duration"]}
+        return {"ok": bool(acc), "count": len(_INDEX), "duration": _META["duration"], "complete": bool(ok1 and ok2)}
     except Exception as e:  # noqa: BLE001
         _META["last_error"] = str(e)
         return {"ok": False, "error": str(e)}
