@@ -108,25 +108,40 @@ def get_product(pid):
     return None
 
 
+async def _fetch_page(params, page, per):
+    """یک صفحه با تایم‌اوتِ سخت + ۳ تلاش با backoff — هاستِ کند گاهی HTML/خطای گذرا می‌دهد."""
+    import asyncio
+
+    import woo
+    last = None
+    for wait_s in (0, 25, 70):
+        if wait_s:
+            await asyncio.sleep(wait_s)
+        try:
+            return await asyncio.wait_for(
+                woo.get("products", {"per_page": per, "page": page, "status": "publish", **params}), timeout=120)
+        except Exception as e:  # noqa: BLE001 — تایم‌اوت/JSONِ خراب/قطعی — تلاشِ بعدی
+            last = e
+    raise last
+
+
 async def _crawl(params, acc, seen_ids, max_pages=600):   # سقف ۳۰هزار — کاتالوگِ واقعی ۲۵هزار+ است
     """یک پیمایشِ صفحه‌به‌صفحه با پارامترهای داده‌شده؛ نتایج به acc اضافه و ذخیرهٔ افزایشی می‌شود."""
     global _INDEX
     import asyncio
 
-    import woo
     page = 1
     per = 50   # صفحهٔ سبک‌تر: هاستِ کند پاسخِ بزرگ را قطره‌ای می‌دهد و read-timeout را دور می‌زند
     while page <= max_pages:
         try:
-            # تایم‌اوتِ سختِ هر صفحه — تا یک پاسخِ قطره‌ای کلِ همگام‌سازی را ساعت‌ها قفل نکند
-            rows = await asyncio.wait_for(
-                woo.get("products", {"per_page": per, "page": page, "status": "publish", **params}), timeout=120)
-        except asyncio.TimeoutError:
-            _META["last_error"] = f"page {page} timeout"
-            print(f"[productindex] صفحهٔ {page} تایم‌اوت شد — ادامه در دورِ بعد")
+            rows = await _fetch_page(params, page, per)
+        except Exception as e:  # noqa: BLE001 — بعد از ۳ تلاش هم نشد → «ناتمام»؛ حلقه بعداً ادامه می‌دهد
+            _META["last_error"] = f"page {page}: {type(e).__name__}: {str(e)[:80]}"
+            print(f"[productindex] صفحهٔ {page} بعد از ۳ تلاش ناموفق — ادامه در دورِ بعد")
             return False
         if not isinstance(rows, list) or not rows:
             return True
+        await asyncio.sleep(0.8)   # فاصلهٔ ملایم — هاست را عصبانی نکنیم (فایروال/ریت‌لیمیت)
         for p in rows:
             if p.get("id") in seen_ids:
                 continue
