@@ -246,6 +246,8 @@ async def reply_image(channel, user_id, image_data_url, caption="", user_name=No
     answer = textfmt.clean_for_chat(answer) or _FALLBACK
     if ctx.get("cards"):
         answer = textfmt.strip_product_lines(answer) or "چند ساعتِ نزدیک به تصویری که فرستادید پیدا کردم 🌟 ببینید:"
+        if not ctx.get("reacted_product"):
+            ctx["photo_product"] = (ctx["cards"][0].get("name") or "").strip()   # عکسِ مشتری → علاقهٔ واقعی
 
     # اگر فقط جنسیت را پرسیده (نه کارت، نه رسید) → فلگ بزن تا ساختار ارجاع‌به‌همکاران رخ ندهد.
     # تشخیصِ متحمل (مستقل از ترتیب/جمله‌بندی): هر دو واژهٔ «خانم» و «آقا» + علامتِ سؤال.
@@ -404,9 +406,15 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
     elif cards:  # کانال خودش کارت‌ها را رندر می‌کند → فقط مقدمهٔ تمیزِ گفتگویی
         text = textfmt.strip_product_lines(text) or "چند گزینهٔ خوب و مناسب براتون پیدا کردم 🌟 در ادامه ببینید:"
     wm = ctx.get("wrist_media")
-    if wm and wm.get("ids"):  # لینکِ پستِ چنلِ مدیای روی‌مچ — برای همهٔ کانال‌ها (نه فقط چت‌سایت)
-        links = "\n".join(f"https://t.me/{wm['channel']}/{i}" for i in wm["ids"][:4])
-        text = (text + "\n\n🎥 عکس و ویدئوی روی مچ‌دستِ همین ساعت:\n" + links).strip()
+    if wm and wm.get("ids"):
+        # «خودِ مدیا» را بفرست (فایل از کشِ یوزربات) — لینک فقط fallback برای وب/عدمِ‌دسترسیِ فایل
+        files = await _fetch_wrist_files(wm["ids"][:4])
+        if files:
+            wm["files"] = files   # کانال (واتساپ/تلگرام/اینستا) خودش فایل‌ها را ارسال می‌کند
+        _ch_now = (customer or {}).get("channel") or ""
+        if not files or _ch_now in ("web", ""):   # وب نمی‌تواند فایل پوش کند → لینک
+            links = "\n".join(f"https://t.me/{wm['channel']}/{i}" for i in wm["ids"][:4])
+            text = (text + "\n\n🎥 عکس و ویدئوی روی مچ‌دستِ همین ساعت:\n" + links).strip()
     if _ck and ctx.get("cards"):  # ثبتِ کارت‌های نشان‌داده‌شده تا دفعهٔ بعد تکرار نشوند
         sessions.add_shown(_ck[0], _ck[1], [c.get("id") for c in ctx["cards"] if c.get("id")])
     _record_metrics((customer or {}).get("channel"), ctx, _last_user_text(messages), (customer or {}).get("name"), (customer or {}).get("id"), answer=text)
@@ -526,6 +534,8 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         ctx["ask_staff"] = True   # فقط وقتی مغز صریحاً درماند → ارجاع به همکاران (نه catch-all)
         text = text.replace("‹ASKSTAFF›", "").replace("<ASKSTAFF>", "").replace("ASKSTAFF", "").strip()
     cards = ctx.get("cards") or []
+    if cards and not ctx.get("reacted_product"):
+        ctx["photo_product"] = (cards[0].get("name") or "").strip()   # عکسِ خودِ مشتری → علاقهٔ واقعی (نزدیک‌ترین تطبیق)
     if (customer or {}).get("channel") == "instagram":
         _short_links_for_ig(cards)   # لینکِ کوتاه برای اینستاگرام
     _intro = "چند ساعتِ نزدیک به تصویری که فرستادید پیدا کردم 🌟 ببینید:"
@@ -543,6 +553,22 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         sessions.add_shown(_ck[0], _ck[1], [c.get("id") for c in cards if c.get("id")])
     _record_metrics((customer or {}).get("channel"), ctx, caption, (customer or {}).get("name"), (customer or {}).get("id"), image=True, answer=text)
     return (text, ctx)
+
+
+async def _fetch_wrist_files(ids):
+    """فایل‌های مدیای چنل را از کشِ یوزربات می‌گیرد (دانلود روی دیسکِ مشترکِ همین سرور)."""
+    try:
+        import config
+        import httpx
+        async with httpx.AsyncClient(timeout=90) as c:
+            r = await c.get("http://127.0.0.1:8091/api/media/fetch",
+                            params={"ids": ",".join(str(i) for i in ids)},
+                            headers={"X-SB-Token": config.SALE_BRAIN_TOKEN})
+        d = r.json() if r.status_code == 200 else {}
+        return d.get("files") or []
+    except Exception as e:  # noqa: BLE001
+        print(f"[assistant] دریافتِ فایلِ مدیای چنل ناموفق: {type(e).__name__}: {e}")
+        return []
 
 
 def _short_links_for_ig(cards):

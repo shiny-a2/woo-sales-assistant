@@ -351,6 +351,9 @@ async def dispatch(name, args_json, ctx):
                     "note": "با این کد تطابقِ دقیق پیدا نشد. اول این نامزدها (candidates) و محصولاتِ نشان‌داده‌شده را بررسی کن؛ "
                             "اگر کد به یکی اشاره دارد درباره‌اش بگو. هرگز نگو «ناموجود»؛ اگر مطمئن نیستی مؤدبانه کد را دوباره بپرس.",
                 })
+            # مشتری خودش این کد/مدل را نام برده → «موردِ علاقهٔ» واقعیِ اوست (برای آمار/هشدارِ داغ)
+            if items and not ctx.get("reacted_product"):
+                ctx["reacted_product"] = (items[0].get("name") or "").strip()
             return _json({
                 "count": len(items),
                 "products": items,

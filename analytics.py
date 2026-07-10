@@ -116,6 +116,9 @@ def record(channel, cid, name, user_msg, ctx):
         for rp2 in (ctx.get("reacted_products") or []):   # ریپلایِ چند-محصولی → همه شمرده شوند
             if (rp2 or "").strip():
                 products.append(rp2.strip())
+        pp = (ctx.get("photo_product") or "").strip()     # عکسِ خودِ مشتری از یک مدل → علاقهٔ واقعی
+        if pp:
+            products.append(pp)
         wm = ctx.get("wrist_media") or {}
         if isinstance(wm, dict) and (wm.get("product_name") or "").strip():
             products.append(wm["product_name"].strip())
