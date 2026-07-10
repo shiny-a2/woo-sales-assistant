@@ -331,6 +331,16 @@ async def dispatch(name, args_json, ctx):
             ref = args.get("reference", "")
             items = await woo.search_by_reference(ref)
             if not items:
+                # محصول در سایت نیست ولی شاید «مدیای همین رفرنس» در چنل باشد → مستقیم بده (نگو پیدا نکردم)
+                _m = mediaidx.lookup(reference=ref)
+                if _m and _m.get("ids"):
+                    ctx["wrist_media"] = {**_m, "product_name": ref}
+                    return _json({
+                        "count": 0, "products": [], "channel_media_found": True,
+                        "note": "این کد به‌عنوانِ محصول در سایت ثبت نیست، ولی عکس/ویدئوی روی مچِ همین رفرنس در چنلِ ما هست و "
+                                "خودکار برای مشتری ارسال می‌شود. کوتاه بگو «عکس و ویدئوی روی مچِ همین مدل رو براتون فرستادم 🌟» و "
+                                "اضافه کن برای قیمت و موجودیِ دقیقش همین حالا از همکاران استعلام می‌کنی (request_human لازم نیست؛ فقط بگو می‌پرسی).",
+                    })
                 # کدِ متنی پیدا نشد → آخرین تلاش: جستجوی عمومیِ سایت با همان کد + محصولاتِ نشان‌داده‌شده
                 fallback = await woo.search_products(query=ref, in_stock_only=True, limit=7)
                 shown = await woo.get_briefs(ctx.get("shown_ids") or []) if ctx.get("shown_ids") else []
