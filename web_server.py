@@ -165,6 +165,40 @@ def _check_sb_token(token):
         raise HTTPException(status_code=401, detail="invalid token")
 
 
+class OpsAlertIn(BaseModel):
+    text: str = ""            # متنِ هشدار (فارسی)
+    source: str = ""          # مبدأ: "wa" یا "ig" یا … (برای دسته‌بندی)
+
+
+# ضدِ سیل: هر منبع حداکثر یک هشدارِ مشابه در این بازه (ثانیه) — کیل‌سوییچ نباید مدیر را بمباران کند
+_ops_alert_last: dict[str, float] = {}
+_OPS_ALERT_MIN_GAP = 900   # ۱۵ دقیقه
+
+
+@app.post("/api/ops/alert")
+async def ops_alert(body: OpsAlertIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """هابِ مرکزیِ هشدارِ عملیاتی: پیامِ کیل‌سوییچِ سایفون (و مانندِ آن) را به تلگرامِ مدیران می‌رساند."""
+    _check_sb_token(x_sb_token)
+    txt = (body.text or "").strip()
+    if not txt:
+        return {"ok": False, "error": "empty"}
+    key = (body.source or "?") + "|" + txt[:60]
+    now = time.time()
+    if now - _ops_alert_last.get(key, 0.0) < _OPS_ALERT_MIN_GAP:
+        return {"ok": True, "throttled": True}   # اخیراً همین هشدار رفته — تکرار نکن
+    _ops_alert_last[key] = now
+    if not _tg_app or not config.ADMIN_USER_IDS:
+        return {"ok": False, "error": "no telegram/admins"}
+    sent = 0
+    for aid in config.ADMIN_USER_IDS:
+        try:
+            await _tg_app.bot.send_message(aid, txt, disable_web_page_preview=True)
+            sent += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[brain] هشدارِ عملیاتی به ادمین {aid} ناموفق: {type(e).__name__}: {e}")
+    return {"ok": sent > 0, "sent": sent}
+
+
 class RecoveryNotifyIn(BaseModel):
     text: str = ""                       # کارتِ خوانا برای همکاران (HTML)
     wa_link: str = ""                    # لینکِ آمادهٔ web.whatsapp.com/send با پیامِ پرشده
