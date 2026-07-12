@@ -664,9 +664,11 @@ def dna_hint(channel, cid):
     chans = list((p.get("channels") or {}).keys())
     if len(chans) > 1:
         bits.append("از چند کانالِ مختلف با ما در ارتباط بوده (همان شخص)")
+    nm = p.get("name") or ""
+    if not nm and p.get("msgs", 0) >= 1:   # نامش را نداریم → نامحسوس اسم و فامیلش را در فرصتِ مناسب بپرس
+        bits.append("نامش را نداریم — در یک لحظهٔ مناسبِ گفتگو خیلی نامحسوس و دوستانه اسم و فامیلش را بپرس و با save_customer_name ذخیره کن")
     if not bits:
         return ""
-    nm = p.get("name") or ""
     head = f"🧬 پروفایلِ این مشتری{(' («' + nm + '»)') if nm else ''} — فقط برای شخصی‌سازیِ تو (خودت بی‌جهت رو نکن): "
     return head + "؛ ".join(bits) + ". از این شناخت برای پیشنهادِ دقیق‌تر و لحنِ مناسب‌تر استفاده کن."
 

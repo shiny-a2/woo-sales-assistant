@@ -179,12 +179,13 @@ SCHEMAS = [
         "type": "function",
         "function": {
             "name": "save_customer_name",
-            "description": "ثبت نام و نام‌خانوادگیِ مشتری وقتی آن را گفت (برای به‌روزرسانی پروفایل در دیتابیس).",
+            "description": "ثبتِ نام/نام‌خانوادگیِ مشتری (و در صورتِ وجود، شمارهٔ تماسی که برای پیگیری در واتساپ/تلگرام داد) — برای به‌روزرسانیِ پروفایلِ واحدِ مشتری.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "first_name": {"type": "string", "description": "نام"},
                     "last_name": {"type": "string", "description": "نام خانوادگی"},
+                    "phone": {"type": "string", "description": "شمارهٔ تماسِ مشتری اگر آن را داد (اختیاری)"},
                 },
                 "required": ["first_name"],
             },
@@ -409,6 +410,7 @@ async def dispatch(name, args_json, ctx):
             ctx["name_update"] = {
                 "first_name": (args.get("first_name") or "").strip(),
                 "last_name": (args.get("last_name") or "").strip(),
+                "phone": (args.get("phone") or "").strip(),
             }
             return _json({"ok": True})
 
