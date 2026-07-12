@@ -52,6 +52,16 @@ _STORE_REFERRAL_KW = ["حضوری", "به شعبه", "شعبهٔ", "شعبه م�
                       "تشریف بیاورید", "تشریف بیارین", "از نزدیک", "حضوراً", "به فروشگاه مراجعه"]
 
 
+_WRIST_KW = ("روی مچ", "رو مچ", "مچ دست", "مچ‌دست", "مچ‌ دست", "عکس واقعی", "عکسِ واقعی", "ویدیو واقعی",
+             "ویدئو واقعی", "عکس اصل", "این رو ببینم", "اینو ببینم", "همین رو ببینم", "واقعیش", "عکس مچ")
+
+
+def _wants_wrist(text):
+    """آیا مشتری «عکس/ویدئوی واقعیِ روی مچِ» همین ساعت را خواسته؟ (برای fallbackِ قطعیِ مچ در مسیرِ ویژن)."""
+    t = (text or "").strip()
+    return bool(t) and any(k in t for k in _WRIST_KW)
+
+
 def _price_band(toman):
     """بازهٔ قیمتِ خوانا برای «اتریبیوتِ مشترکِ مدل‌های موردِعلاقه» (تومان → میلیون)."""
     try:
@@ -544,6 +554,9 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         "همکاران بررسی می‌کنن و نتیجهٔ تأیید رو خدمتتون اعلام می‌کنیم 🙏»، و اگر مبلغ/تاریخ/شمارهٔ پیگیری خواناست کوتاه بازگو کن.\n"
         "• اگر **ساعت** است و با اطمینان تشخیصش دادی: با search_watches همان یا مشابه‌هایش را پیدا کن، "
         "بعد حتماً با show_products به‌صورت کارت نشان بده.\n"
+        "• 🎯 **اگر مشتری کنارِ عکس، «عکس/ویدئوی واقعی» یا «روی مچ» یا «همین رو ببینم» خواست** (مثلِ «عکس واقعی این رو ببینم»): "
+        "بعد از اینکه محصول را با search_watches پیدا کردی، **حتماً و همان لحظه get_wrist_media(آیدیِ همان محصول) را صدا بزن** تا مدیای واقعی ارسال شود. "
+        "⛔ **هرگز نگو «ارسال شد / آماده‌ست / می‌فرستم» مگر اینکه واقعاً همان لحظه get_wrist_media را صدا زده باشی** — ادعای ارسالِ مدیا بدونِ صدازدنِ ابزار مطلقاً ممنوع است؛ اول ابزار، بعد دقیقاً بر اساسِ نتیجه‌اش حرف بزن.\n"
         "• اگر **ساعت** است ولی **مطمئن نیستی زنانه است یا مردانه** (مثلاً قابِ متوسط یا مدلی بینِ زنانه و مردانه): "
         "هیچ ساعتی نشان نده و حدس نزن؛ رنگ/استایلی که از تصویر فهمیدی را کوتاه بگو و حتماً این عبارت را در سؤالت بیاور "
         "«این ساعت رو برای خانم می‌خواید یا آقا؟»، بعد از جواب با همان مشخصات + جنسیت جستجو کن (این یک سؤالِ کوتاه است، نه ارجاع به همکاران).\n"
@@ -615,6 +628,49 @@ async def answer_image(image_data_url, caption="", messages=None, render_cards_i
         ctx["ask_gender"] = True
     if _ck and cards:  # ثبتِ کارت‌های تصویری در همان مخزنِ shown_ids (عدمِ‌تکرار با مسیرِ متن)
         sessions.add_shown(_ck[0], _ck[1], [c.get("id") for c in cards if c.get("id")])
+    # fallbackِ قطعیِ مچ: مدلِ ویژن گاهی get_wrist_media را نمی‌زند و الکی می‌گوید «ارسال شد».
+    # اگر مشتری «عکس واقعی/روی مچ» خواست و محصولی شناسایی شد، خودمان مستقیم مدیا را resolve می‌کنیم.
+    if _wants_wrist(caption) and not ctx.get("wrist_media") and not ctx.get("wrist_media_request") \
+            and not ctx.get("wrist_media_company_stock"):
+        try:
+            import re as _re
+            import mediaidx
+            import woo
+            _b0 = cards[0] if cards else None
+            _ref = (_b0 or {}).get("reference") or None
+            _url = (_b0 or {}).get("url") or None
+            if not _ref:   # مدل معمولاً رفرنس را در کپشن یا پاسخش می‌آورد (مثلِ «FL.1.10304-1»)
+                _m = _re.search(r"[A-Za-z]{1,4}[.\-]?\d[\d.\-]{3,}", (caption or "") + " " + (text or ""))
+                if _m:
+                    _ref = _m.group(0).strip(".-")
+            if _ref and not _url:   # مدیا اغلب با URLِ محصول ایندکس شده نه رفرنس → اول محصول را از رفرنس پیدا کن
+                try:
+                    _items = await woo.search_by_reference(_ref)
+                    if _items:
+                        _b0 = _items[0]
+                        _url = _b0.get("url") or _url
+                        _ref = _b0.get("reference") or _ref
+                except Exception:  # noqa: BLE001
+                    pass
+            if _ref or _url:
+                _media = mediaidx.lookup(reference=_ref, url=_url)
+                if _media and _media.get("ids"):
+                    ctx["wrist_media"] = {**_media, "product_name": (_b0 or {}).get("name", "")}
+                elif _b0 and _b0.get("shipping_time") == "ارسال فوری":   # موجودِ فروشگاه ولی در چنل نبود → از همکاران بخواه
+                    ctx["wrist_media_request"] = {"reference": _b0.get("reference", ""), "name": _b0.get("name", ""),
+                                                  "image": _b0.get("image"), "url": _b0.get("url", "")}
+        except Exception:  # noqa: BLE001
+            pass
+    # عکس/ویدئوی روی مچ: مثلِ مسیرِ متن، «خودِ فایل» را ضمیمه کن تا کانال ارسالش کند (این بلاک در مسیرِ ویژن جا افتاده بود)
+    wm = ctx.get("wrist_media")
+    if wm and wm.get("ids"):
+        files = await _fetch_wrist_files(wm["ids"][:4])
+        if files:
+            wm["files"] = files   # کانال (واتساپ/تلگرام/اینستا) خودش فایل‌ها را می‌فرستد
+        _ch_now = (customer or {}).get("channel") or ""
+        if not files or _ch_now in ("web", ""):   # وب نمی‌تواند فایل پوش کند → لینک
+            links = "\n".join(f"https://t.me/{wm['channel']}/{i}" for i in wm["ids"][:4])
+            text = (text + "\n\n🎥 عکس و ویدئوی روی مچ‌دستِ همین ساعت:\n" + links).strip()
     _record_metrics((customer or {}).get("channel"), ctx, caption, (customer or {}).get("name"), (customer or {}).get("id"), image=True, answer=text)
     return (text, ctx)
 

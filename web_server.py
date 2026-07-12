@@ -825,6 +825,11 @@ async def brain_vision(body: VisionIn, x_sb_token: str = Header(None, alias="X-S
         "escalated": bool(escalated),
         "handoff": bool(handoff),
         "handoff_reason": (handoff or {}).get("reason", "") if handoff else "",
+        # مدیای «روی مچ» باید مثلِ /api/chat در پاسخ باشد وگرنه کانال هرگز فایل را نمی‌گیرد (باگِ ارسال‌نشدنِ عکس در مسیرِ عکس)
+        "wrist_media": ctx.get("wrist_media") or None,
+        "wrist_media_request": ctx.get("wrist_media_request") or None,
+        "wrist_media_company_stock": ctx.get("wrist_media_company_stock") or None,
+        "order": ctx.get("order") or None,
     }
 
 
