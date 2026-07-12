@@ -29,8 +29,12 @@ _PAID = ("completed", "processing", "on-hold", "deliver", "delivered")
 
 
 # ---------------- کمک‌تابع‌های پایه ----------------
+# ارقامِ فارسی/عربی → اسکی؛ وگرنه «۰۹۱۲…» با «0912…» یکی شمرده نمی‌شود و تطبیق/مرجِ شماره می‌شکند
+_DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
 def _digits(s):
-    return "".join(ch for ch in str(s or "") if ch.isdigit())
+    return "".join(ch for ch in str(s or "").translate(_DIGIT_MAP) if ch in "0123456789")
 
 
 def _ph9(s):
@@ -319,7 +323,7 @@ def _merge_persons(keep_pid, drop_pid, conn):
     a["msgs"] = a.get("msgs", 0) + b.get("msgs", 0)
     a["first_seen"] = min(a.get("first_seen", _now()), b.get("first_seen", _now()))
     a["last_seen"] = max(a.get("last_seen", 0), b.get("last_seen", 0))
-    for k in ("brands", "products", "intent", "sentiment", "signals", "tone", "channels"):
+    for k in ("brands", "products", "intent", "sentiment", "signals", "tone", "channels", "attrs"):
         _merge_counts(a.setdefault(k, {}), b.get(k, {}))
     a["interests"] = list(dict.fromkeys(a.get("interests", []) + b.get("interests", [])))
     if b.get("crm") and (not a.get("crm") or (b["crm"].get("orders_count", 0) > a["crm"].get("orders_count", 0))):
@@ -436,6 +440,9 @@ def observe(channel, cid, name=None, signals=None):
             p["brands"][b] = p["brands"].get(b, 0) + 1
         for pr in (s.get("products") or []):
             p["products"][pr] = p["products"].get(pr, 0) + 2
+        for a in (s.get("attrs") or []):   # اتریبیوت‌های مشترکِ مدل‌های موردِعلاقه (نوعِ موتور، بازهٔ قیمت، …)
+            if a:
+                p.setdefault("attrs", {})[a] = p.get("attrs", {}).get(a, 0) + 1
         if s.get("level"):
             p["intent"][s["level"]] = p["intent"].get(s["level"], 0) + 1
         if s.get("order"):
@@ -460,6 +467,67 @@ def observe(channel, cid, name=None, signals=None):
 
 def by_phone(phone):
     return _idents_by_phone(phone)
+
+
+def phone_of(channel, cid):
+    """بهترین شمارهٔ ثبت‌شدهٔ این مخاطب را بده (حتی اگر در همین چت نداده — از پروفایلِ مرج‌شده) یا ''.
+    این اجازه می‌دهد سابقهٔ خرید و شخصی‌سازی برای هر کانال (تلگرام/اینستا/سایت) اجرا شود، نه فقط وقتی شماره داده."""
+    try:
+        e = _get_ident(channel, cid)
+        if not e:
+            return ""
+        p = _load_person(e.get("pid"))
+        phones = (p or {}).get("phones") or []
+        return _digits(phones[0]) if phones else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def migrate_normalize_phones():
+    """یک‌بار: ارقامِ فارسیِ شماره‌ها را در identities/persons/crm_push به اسکی نرمال و پروفایل‌های هم‌شماره را ادغام کن."""
+    conn = _c()
+    fixed_id = fixed_p = merged = 0
+    # ۱) identities: phone9 و blob.phone را از روی خودِ blob بازسازی کن
+    rows = conn.execute("SELECT idkey, pid, phone9, blob FROM identities").fetchall()
+    for idkey, pid, phone9, blob in rows:
+        try:
+            e = json.loads(blob)
+        except Exception:  # noqa: BLE001
+            continue
+        ph = _digits(e.get("phone") or "")
+        new9 = _ph9(ph)
+        if ph != (e.get("phone") or "") or (new9 or "") != (phone9 or ""):
+            e["phone"] = ph
+            conn.execute("UPDATE identities SET phone9=?, blob=? WHERE idkey=?",
+                         (new9, json.dumps(e, ensure_ascii=False), idkey))
+            fixed_id += 1
+    # ۲) persons.phones را نرمال کن
+    for (pid,) in conn.execute("SELECT pid FROM persons").fetchall():
+        p = _load_person(pid, conn)
+        if not p:
+            continue
+        old = p.get("phones") or []
+        new = list(dict.fromkeys(_digits(x) for x in old if _digits(x)))
+        if new != old:
+            p["phones"] = new
+            _store_person(p, conn)
+            fixed_p += 1
+    # ۳) crm_push.phone را نرمال کن
+    for (ph,) in conn.execute("SELECT phone FROM crm_push").fetchall():
+        n = _digits(ph)
+        if n and n != ph:
+            conn.execute("UPDATE OR IGNORE crm_push SET phone=? WHERE phone=?", (n, ph))
+    conn.commit()
+    # ۴) حالا که phone9ها یکدست شد، پروفایل‌های هم‌شماره را ادغام کن
+    dupe = conn.execute("SELECT phone9 FROM identities WHERE phone9<>'' GROUP BY phone9 "
+                        "HAVING COUNT(DISTINCT pid)>1").fetchall()
+    for (p9,) in dupe:
+        pids = sorted({r[0] for r in conn.execute("SELECT DISTINCT pid FROM identities WHERE phone9=?", (p9,))})
+        for opid in pids[1:]:
+            _merge_persons(pids[0], opid, conn)
+            merged += 1
+    conn.commit()
+    return {"identities_fixed": fixed_id, "persons_fixed": fixed_p, "merged": merged}
 
 
 # ---------------- سابقهٔ خرید + هینتِ مغز ----------------
@@ -565,6 +633,9 @@ def dna_hint(channel, cid):
     prods = _top(p.get("products", {}), 2)
     if prods:
         bits.append("محصولاتی که رویشان واکنش نشان داده: " + "، ".join(prods))
+    attrs = _top(p.get("attrs", {}), 3)
+    if attrs:
+        bits.append("ویژگی‌های مشترکِ مدل‌هایی که پسندیده: " + "، ".join(attrs))
     intent = p.get("intent", {})
     if intent.get("order"):
         bits.append("قبلاً قصدِ خرید/سفارش داشته")

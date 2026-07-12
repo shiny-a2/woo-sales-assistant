@@ -52,6 +52,27 @@ _STORE_REFERRAL_KW = ["حضوری", "به شعبه", "شعبهٔ", "شعبه م�
                       "تشریف بیاورید", "تشریف بیارین", "از نزدیک", "حضوراً", "به فروشگاه مراجعه"]
 
 
+def _price_band(toman):
+    """بازهٔ قیمتِ خوانا برای «اتریبیوتِ مشترکِ مدل‌های موردِعلاقه» (تومان → میلیون)."""
+    try:
+        m = float(toman or 0) / 1_000_000
+    except Exception:  # noqa: BLE001
+        return ""
+    if m <= 0:
+        return ""
+    if m < 5:
+        return "بازهٔ قیمتیِ زیرِ ۵ میلیون"
+    if m < 10:
+        return "بازهٔ قیمتیِ ۵ تا ۱۰ میلیون"
+    if m < 20:
+        return "بازهٔ قیمتیِ ۱۰ تا ۲۰ میلیون"
+    if m < 40:
+        return "بازهٔ قیمتیِ ۲۰ تا ۴۰ میلیون"
+    if m < 80:
+        return "بازهٔ قیمتیِ ۴۰ تا ۸۰ میلیون"
+    return "بازهٔ قیمتیِ بالای ۸۰ میلیون"
+
+
 def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False, answer=""):
     """شمردنِ عملکرد + تحلیلِ رفتارِ مشتری: پاسخ/کانال + رویدادهای کلیدی (سفارش/رسید/ارجاع/مدیا) + سیگنال‌های فروش."""
     _repair = _sell = _store = False
@@ -97,7 +118,33 @@ def _record_metrics(channel, ctx, user_text="", name="", cid="", image=False, an
         # DNA: هویت + رفتار را در پروفایلِ واحد تجمیع کن (سیگنال‌ها از analytics، بدونِ استخراجِ دوباره)
         s = dict(sig or {})
         s.update({"repair": _repair, "sell_intent": _sell, "store_referral": _store, "ab": _abk})
+        # برند و بازهٔ قیمتِ کارت‌هایی که مغز «نشان داد» → علاقهٔ ضعیف؛ برندِ موردِعلاقه و اتریبیوتِ مشترک به‌مرور شکل می‌گیرد
+        try:
+            _cards = ctx.get("cards") or []
+            if _cards:
+                import brands as _brm
+                _sb, _at = [], []
+                for _cd in _cards[:8]:
+                    for _b in _brm.find_in_text(_cd.get("name") or ""):
+                        _sb.append(_b)
+                    _band = _price_band(_cd.get("price_toman"))
+                    if _band:
+                        _at.append(_band)
+                if _sb:
+                    s["brands"] = list(dict.fromkeys(list(s.get("brands") or []) + _sb))[:6]
+                if _at:
+                    s["attrs"] = list(dict.fromkeys(list(s.get("attrs") or []) + _at))[:3]
+        except Exception:  # noqa: BLE001
+            pass
         crm_index.observe(channel, cid, name, s)
+        # واتساپ: خودِ آیدیِ گفتگو شماره است (98xxx@c.us) → همان‌جا لینک کن تا با CRM/خریدهای هم‌شماره خودکار مرج شود
+        try:
+            if str(channel or "").startswith("whats"):
+                _wa = crm_index._digits(cid)
+                if len(_wa) >= 10:
+                    crm_index.link(channel, cid, phone=_wa)
+        except Exception:  # noqa: BLE001
+            pass
         # شمارهٔ کشف‌شده در گفتگو (ثبتِ سفارش یا ارجاع به انسان) → روی هویت ثبت کن تا با پروفایلِ
         # هم‌شماره (خریدها/دیگر کانال‌ها) ادغام و DNA کامل شود. کلیدِ «سینکِ بعدی» همین است.
         _order = ctx.get("order") or {}
@@ -173,6 +220,12 @@ async def reply(channel, user_id, text, user_name=None, customer_phone=None):
     _dna = _dna_hint_msg(channel, user_id)   # پروفایلِ رفتاریِ مشتری (مستقل از شماره)
     if _dna:
         messages.append(_dna)
+    if not customer_phone:   # سایت/کانالی که شماره نداد → از پروفایلِ DNA پیدا کن تا سابقه‌اش تزریق شود
+        try:
+            import crm_index
+            customer_phone = crm_index.phone_of(channel, user_id) or None
+        except Exception:  # noqa: BLE001
+            pass
     if customer_phone:   # سابقهٔ خریدِ مشتری (کش‌شده) را به مغز بده تا شخصی‌سازی کند
         try:
             import crm_index
@@ -364,6 +417,12 @@ async def answer_messages(messages, system_extra="", render_cards_inline=True, r
             convo.append(_dna)
     if customer:   # سابقهٔ خریدِ مشتری (برای واتساپ، آیدی همان شماره است)
         _ph = customer.get("phone") or (customer.get("id") if customer.get("channel") == "whatsapp" else None)
+        if not _ph:   # هر کانالِ دیگر: شماره را از پروفایلِ DNA (اگر قبلاً داده/مرج شده) پیدا کن → شخصی‌سازی برای همه
+            try:
+                import crm_index
+                _ph = crm_index.phone_of(customer.get("channel"), customer.get("id")) or None
+            except Exception:  # noqa: BLE001
+                _ph = None
         if _ph:
             try:
                 import crm_index
@@ -565,7 +624,9 @@ async def _fetch_wrist_files(ids):
                             params={"ids": ",".join(str(i) for i in ids)},
                             headers={"X-SB-Token": config.SALE_BRAIN_TOKEN})
         d = r.json() if r.status_code == 200 else {}
-        return d.get("files") or []
+        files = d.get("files") or []
+        print(f"[assistant] فایلِ مدیای مچ: {len(files)} (ids={ids})")
+        return files
     except Exception as e:  # noqa: BLE001
         print(f"[assistant] دریافتِ فایلِ مدیای چنل ناموفق: {type(e).__name__}: {e}")
         return []
