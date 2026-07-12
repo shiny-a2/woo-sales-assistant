@@ -323,10 +323,19 @@ async def dispatch(name, args_json, ctx):
             orders = await woo.customer_orders(args.get("phone", ""))
             if not orders:
                 return _json({"found": False, "note": "سفارشی برای این شماره پیدا نشد — احتمالاً مشتریِ جدید است."})
-            return _json({"found": True, "count": len(orders), "orders": [
-                {"number": o["number"], "date": o["date"],
-                 "status": persona.STATUS_FA.get(o["status"], o["status"]),
-                 "total_toman": o["total_toman"], "items": o["items"]} for o in orders]})
+            # تفکیکِ وضعیت‌ها: «موفق» (در حال انجام/تکمیل/تحویل) در برابر «لغو/ناموفق» — برای آمارِ دقیق‌تر
+            _SUCCESS = ("processing", "completed", "delivered", "deliver")
+            _LOST = ("cancelled", "failed", "refunded")
+            succ = [o for o in orders if o.get("status") in _SUCCESS]
+            lost = [o for o in orders if o.get("status") in _LOST]
+            return _json({"found": True, "count": len(orders),
+                          "success_count": len(succ), "lost_count": len(lost),
+                          "in_progress_count": len(orders) - len(succ) - len(lost),
+                          "orders": [
+                              {"number": o["number"], "date": o["date"],
+                               "status": persona.STATUS_FA.get(o["status"], o["status"]),
+                               "success": o.get("status") in _SUCCESS,
+                               "total_toman": o["total_toman"], "items": o["items"]} for o in orders]})
 
         if name == "find_by_reference":
             ref = args.get("reference", "")

@@ -55,8 +55,8 @@ def tehran_now():
     return utcnow() + _TEHRAN
 
 
-def jalali_str(dt=None):
-    """تاریخِ شمسی «۱۴۰۴/۰۴/۱۹ ۲۱:۳۰» از یک datetimeِ میلادی (پیش‌فرض: اکنونِ تهران)."""
+def _to_jalali(dt=None):
+    """(jy, jm, jd) شمسی از یک datetimeِ میلادی."""
     d = dt or tehran_now()
     gy, gm, gd = d.year, d.month, d.day
     g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
@@ -73,4 +73,27 @@ def jalali_str(dt=None):
         days = (days - 1) % 365
     jm = 1 + (days // 31 if days < 186 else 6 + (days - 186) // 30)
     jd = 1 + (days % 31 if days < 186 else (days - 186) % 30)
+    return jy, jm, jd
+
+
+def jalali_str(dt=None):
+    """تاریخِ شمسیِ کامل «۱۴۰۴/۰۴/۱۹ ۲۱:۳۰» از میلادی (پیش‌فرض: اکنونِ تهران)."""
+    d = dt or tehran_now()
+    jy, jm, jd = _to_jalali(d)
     return f"{jy:04d}/{jm:02d}/{jd:02d} {d.strftime('%H:%M')}"
+
+
+def jalali_date(dt=None):
+    """فقط تاریخِ شمسی «۱۴۰۴/۰۴/۱۹» (بدونِ ساعت)."""
+    jy, jm, jd = _to_jalali(dt)
+    return f"{jy:04d}/{jm:02d}/{jd:02d}"
+
+
+def month_start(dt=None):
+    """datetimeِ میلادیِ «اولِ ماهِ شمسیِ جاری» ساعت ۰۰:۰۰ (تهران).
+    ترفند: امروز روزِ jdاُمِ ماهِ شمسی است، پس اولِ ماه (jd-1) روز پیش بوده — بدونِ نیاز به تبدیلِ کاملِ شمسی→میلادی."""
+    import datetime as _dt
+    d = dt or tehran_now()
+    _, _, jd = _to_jalali(d)
+    start = d - _dt.timedelta(days=jd - 1)
+    return start.replace(hour=0, minute=0, second=0, microsecond=0)

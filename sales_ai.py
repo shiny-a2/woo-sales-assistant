@@ -89,37 +89,50 @@ def _extract_json(text):
 
 
 # ---------------- جمع‌آوریِ داده ----------------
-async def _woo_sales(days=14):
-    """خلاصهٔ فروشِ واقعیِ سایت در N روزِ اخیر (best-effort؛ کش‌شده تا سرعتِ چتِ مدیریتی بالا بماند)."""
+# «فروشِ موفق» = فقط این وضعیت‌ها (در حال انجام / تکمیل‌شده / تحویل‌شده). لغو/ناموفق/مرجوع فروش نیست.
+_SUCCESS_STATUS = ("processing", "completed", "delivered", "deliver")
+_LOST_STATUS = ("cancelled", "failed", "refunded")
+
+
+async def _woo_sales(days=None):
+    """فروشِ واقعیِ سایت از «اولِ ماهِ شمسی» تا امروز — فقط سفارشِ موفق فروش محسوب می‌شود.
+    (best-effort؛ کش‌شده تا سرعتِ چتِ مدیریتی بالا بماند)."""
     import time as _t
     if _woo_cache["data"] is not None and (_t.time() - _woo_cache["t"]) < 900:
         return _woo_cache["data"]
-    out = {"days": days, "orders": 0, "revenue_toman": 0, "by_status": {}, "top_products": [], "avg_toman": 0}
+    import clock
+    start = clock.month_start()   # اولِ ماهِ شمسیِ جاری (۰۰:۰۰ تهران)
+    out = {"range_start": clock.jalali_date(start), "range_end": clock.jalali_date(),
+           "orders": 0, "success_orders": 0, "lost_orders": 0, "revenue_toman": 0,
+           "avg_toman": 0, "by_status": {}, "top_products": []}
     try:
-        import datetime
         import woo
-        after = (_now_h() - datetime.timedelta(days=days)).strftime("%Y-%m-%dT00:00:00")
+        after = start.strftime("%Y-%m-%dT00:00:00")
         rows = await woo.get("orders", {"per_page": 100, "after": after, "orderby": "date", "order": "desc"})
         if not isinstance(rows, list):
             return out
         prod = {}
         paid_total = 0.0
         paid_n = 0
+        lost_n = 0
         for o in rows:
             st = str(o.get("status") or "")
             out["by_status"][st] = out["by_status"].get(st, 0) + 1
-            try:
-                tot = float(o.get("total") or 0)
-            except Exception:  # noqa: BLE001
-                tot = 0.0
-            if st in ("completed", "processing", "on-hold"):
-                paid_total += tot
+            if st in _SUCCESS_STATUS:
+                try:
+                    paid_total += float(o.get("total") or 0)
+                except Exception:  # noqa: BLE001
+                    pass
                 paid_n += 1
-            for li in (o.get("line_items") or []):
-                nm = (li.get("name") or "").strip()
-                if nm:
-                    prod[nm] = prod.get(nm, 0) + int(li.get("quantity") or 1)
-        out["orders"] = len(rows)
+                for li in (o.get("line_items") or []):   # پرفروش‌ها فقط از سفارشِ موفق
+                    nm = (li.get("name") or "").strip()
+                    if nm:
+                        prod[nm] = prod.get(nm, 0) + int(li.get("quantity") or 1)
+            elif st in _LOST_STATUS:
+                lost_n += 1
+        out["success_orders"] = paid_n
+        out["orders"] = paid_n            # «فروش» فقط موفق است (نه کلِ سفارش‌ها)
+        out["lost_orders"] = lost_n
         # ووکامرسِ این سایت مبلغ را به تومان می‌دهد یا ریال؟ همان خام را می‌گذاریم؛ مدل با احتیاط تفسیر می‌کند.
         out["revenue_toman"] = int(paid_total)
         out["avg_toman"] = int(paid_total / paid_n) if paid_n else 0

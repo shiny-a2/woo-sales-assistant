@@ -25,7 +25,10 @@ _CRAWL: dict = {"running": False, "last": 0, "phones": 0, "orders": 0, "leads": 
 _IMPORT: dict = {"running": False, "source": "", "done": 0, "total": 0, "error": ""}
 _UB_DB = os.path.join(os.path.dirname(_HERE), "tg-outreach", "data", "outreach.db")   # SQLiteِ یوزربات
 
-_PAID = ("completed", "processing", "on-hold", "deliver", "delivered")
+# «فروشِ موفق» = فقط این وضعیت‌ها (در حال انجام / تکمیل‌شده / تحویل‌شده)؛ لغو/ناموفق/مرجوع فروش نیست (خواستهٔ مدیر)
+_SUCCESS = ("processing", "completed", "delivered", "deliver")
+_LOST = ("cancelled", "failed", "refunded")
+_PAID = _SUCCESS   # عقب‌رو سازگار — on-hold دیگر «فروشِ موفق» شمرده نمی‌شود
 
 
 # ---------------- کمک‌تابع‌های پایه ----------------
@@ -360,10 +363,15 @@ def _apply_crm(p, orders):
     orders = orders or []
     if not orders:
         return
-    paid = [o for o in orders if o.get("status") in _PAID]
-    dates = sorted([(o.get("date") or "")[:10] for o in orders if o.get("date")])
-    items = []
+    success = [o for o in orders if o.get("status") in _SUCCESS]   # خریدِ موفق (فروشِ واقعی)
+    lost = [o for o in orders if o.get("status") in _LOST]         # لغو/ناموفق/مرجوع
+    st_counts = {}
     for o in orders:
+        st = str(o.get("status") or "")
+        st_counts[st] = st_counts.get(st, 0) + 1
+    dates = sorted([(o.get("date") or "")[:10] for o in success if o.get("date")])   # تاریخِ خریدِ موفق
+    items = []
+    for o in success:   # اقلام و برندِ موردِعلاقه فقط از خریدِ موفق (نه سفارشِ لغو/ناموفق)
         items.extend(o.get("items") or [])
     fav = ""
     try:
@@ -376,8 +384,9 @@ def _apply_crm(p, orders):
             fav = Counter(allb).most_common(1)[0][0]
     except Exception:  # noqa: BLE001
         pass
-    p["crm"] = {"orders_count": len(orders), "paid_count": len(paid),
-                "items": items[:12], "first_order": dates[0] if dates else "",
+    p["crm"] = {"orders_count": len(orders), "success_count": len(success), "lost_count": len(lost),
+                "by_status": st_counts, "items": items[:12],
+                "first_order": dates[0] if dates else "",
                 "last_order": dates[-1] if dates else "", "fav_brand": fav}
     if fav:
         p["brands"][fav] = p["brands"].get(fav, 0) + 2
@@ -535,15 +544,20 @@ def _fmt_history(entry):
     orders = entry.get("orders") or []
     if not orders:
         return ""
-    paid = [o for o in orders if o.get("status") in _PAID]
+    succ = sum(1 for o in orders if o.get("status") in _SUCCESS)   # خریدِ موفق
+    lost = sum(1 for o in orders if o.get("status") in _LOST)       # لغو/ناموفق
+    other = len(orders) - succ - lost                              # در جریان/در انتظار
     lines = []
-    for o in orders[:4]:
+    for o in orders[:5]:
         items = "، ".join(o.get("items") or [])[:80]
-        lines.append(f"- سفارش {o.get('number')} ({(o.get('date') or '')[:10]}, {o.get('status')}): {items}")
-    return ("🧾 سابقهٔ خریدِ این مشتری (فقط برای شخصی‌سازیِ تو؛ خودت بی‌جهت لو نده): "
-            + ("مشتریِ قدیمیِ ماست. " if paid else "سفارش‌هایی داشته (شاید ناتمام). ")
+        st = str(o.get("status") or "")
+        mark = "✅" if st in _SUCCESS else ("❌" if st in _LOST else "⏳")
+        lines.append(f"- {mark} سفارش {o.get('number')} ({(o.get('date') or '')[:10]}, {st}): {items}")
+    summary = f"خریدِ موفق: {succ} · ناموفق/لغو: {lost}" + (f" · در جریان: {other}" if other else "")
+    return ("🧾 سابقهٔ سفارش‌های این مشتری (فقط برای شخصی‌سازیِ تو؛ خودت بی‌جهت لو نده) — " + summary + ": "
+            + ("مشتریِ واقعیِ ماست. " if succ else ("سفارشِ موفقی نداشته (لغو/ناتمام). " if orders else ""))
             + "\n" + "\n".join(lines)
-            + "\n→ گرم و شخصی رفتار کن؛ اگر سفارشی ناتمام مانده، محترمانه کمک کن کامل شود.")
+            + "\n→ گرم و شخصی رفتار کن؛ اگر سفارشی ناتمام/در جریان مانده، محترمانه کمک کن کامل شود.")
 
 
 async def history_hint(channel, cid, phone):
@@ -651,10 +665,14 @@ def dna_hint(channel, cid):
     if sig.get("store_referral"):
         bits.append("تمایل به مراجعهٔ حضوری نشان داده — مزایای خریدِ آنلاین را برجسته کن")
     crm = p.get("crm") or {}
-    if crm.get("orders_count"):
+    _sc = crm.get("success_count", crm.get("paid_count", 0))
+    if _sc:
         extra = f" (آخرین خرید: {crm.get('last_order')})" if crm.get("last_order") else ""
-        bits.append(f"مشتریِ قدیمی با {crm['orders_count']} سفارش{extra}"
+        lostbit = f"؛ {crm['lost_count']} سفارشِ لغو/ناموفق" if crm.get("lost_count") else ""
+        bits.append(f"مشتریِ واقعی با {_sc} خریدِ موفق{extra}{lostbit}"
                     + (f"؛ برندِ خریدِ قبلی: {crm['fav_brand']}" if crm.get("fav_brand") else ""))
+    elif crm.get("lost_count"):
+        bits.append(f"{crm['lost_count']} سفارشِ لغو/ناموفق داشته ولی هنوز خریدِ موفقی نکرده — با انگیزه و اطمینان‌بخشی پیش برو")
     if crm.get("viewed"):
         bits.append("اخیراً در سایت این‌ها را دیده: " + "، ".join(v["name"] for v in crm["viewed"][:3] if v.get("name")))
     if crm.get("recommended"):
