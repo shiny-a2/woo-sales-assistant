@@ -170,6 +170,14 @@ class OpsAlertIn(BaseModel):
     source: str = ""          # مبدأ: "wa" یا "ig" یا … (برای دسته‌بندی)
 
 
+class OperatorExampleIn(BaseModel):
+    channel: str = ""             # wa | tg | ig | site
+    customer_id: str = ""
+    customer_msg: str = ""        # آخرین پیامِ مشتری (زمینه)
+    operator_msg: str = ""        # پاسخِ اپراتورِ انسانی
+    kind: str = "in_platform"     # in_platform (اپراتور در خودِ پلتفرم جواب داد) | live (اتصالِ زندهٔ رله‌شده)
+
+
 # ضدِ سیل: هر منبع حداکثر یک هشدارِ مشابه در این بازه (ثانیه) — کیل‌سوییچ نباید مدیر را بمباران کند
 _ops_alert_last: dict[str, float] = {}
 _OPS_ALERT_MIN_GAP = 900   # ۱۵ دقیقه
@@ -197,6 +205,15 @@ async def ops_alert(body: OpsAlertIn, x_sb_token: str = Header(None, alias="X-SB
         except Exception as e:  # noqa: BLE001
             print(f"[brain] هشدارِ عملیاتی به ادمین {aid} ناموفق: {type(e).__name__}: {e}")
     return {"ok": sent > 0, "sent": sent}
+
+
+@app.post("/api/ops/operator-example")
+async def ops_operator_example(body: OperatorExampleIn, x_sb_token: str = Header(None, alias="X-SB-Token")):
+    """پیامِ اپراتورِ انسانی (اتصالِ زنده یا پاسخِ مستقیم در پلتفرم) را به‌عنوان نمونهٔ یادگیریِ بازبینیِ هوشمند ثبت می‌کند."""
+    _check_sb_token(x_sb_token)
+    import health
+    ok = health.record_operator_example(body.channel, body.customer_id, body.customer_msg, body.operator_msg, body.kind or "in_platform")
+    return {"ok": bool(ok)}
 
 
 class RecoveryNotifyIn(BaseModel):

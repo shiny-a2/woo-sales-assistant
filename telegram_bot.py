@@ -938,6 +938,12 @@ async def _on_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             if answer:
                 import assistant
+                # پاسخِ اپراتورِ انسانی در اتصالِ زنده → نمونهٔ یادگیریِ بازبینیِ هوشمند
+                try:
+                    import health
+                    health.record_operator_example(h["channel"], h["customer_id"], "", answer, "live")
+                except Exception:  # noqa: BLE001
+                    pass
                 txt = await assistant.polish_staff_reply(answer, "") or answer
                 if h["channel"] == "telegram":
                     try:
